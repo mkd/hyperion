@@ -1,0 +1,13 @@
+# Build artifacts
+*.o
+*.d
+*.a
+src/hyperion
+hyperion
+
+# macOS / Editor files
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
