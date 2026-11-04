@@ -1,3 +1,32 @@
+/*
+  Hyperion - A Modern C++26 UCI Chess Engine
+  Copyright (C) 2026 Claudio M. Camacho <claudiomkd@gmail.com>
+
+  Hyperion is a successor of Gargantua, which is derived from Chess0 and
+  inspired by Code Monkey King's bbc-1.4.
+
+  This file is part of Hyperion.  It builds on the Stockfish NNUE code in this
+  directory (Copyright (C) the Stockfish developers, GPL-3.0-or-later).
+
+  Hyperion is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  Hyperion is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+/**
+ * @file nnue_incremental.cpp
+ * @brief Incremental NNUE accumulator driver: mirrors Hyperion moves on a Stockfish position.
+ */
+
 #include "nnue_incremental.h"
 #include "evaluate.h"
 #include "nnue/evaluate_nnue.h"
@@ -7,56 +36,69 @@
 #include <iostream>
 #include <vector>
 
-#define getMoveSource(move) ((move) & 0x3f)
-#define getMoveTarget(move) (((move) & 0xfc0) >> 6)
-#define getMovePiece(move) (((move) & 0xf000) >> 12)
-#define getPromo(move) (((move) & 0xf0000) >> 16)
-#define getMoveCapture(move) ((move) & 0x100000)
-#define getDoublePush(move) ((move) & 0x200000)
-#define getEp(move) ((move) & 0x400000)
-#define getCastle(move) ((move) & 0x800000)
+namespace {
 
-#define MAP_SQ(sq) ((sq) ^ 56)
+// Decoding of Hyperion's packed move format (kept in sync with movgen.h, which
+// cannot be included here because of identifier clashes with Stockfish headers).
+constexpr int getMoveSource(int move)  { return move & 0x3f; }
+constexpr int getMoveTarget(int move)  { return (move & 0xfc0) >> 6; }
+constexpr int getMovePiece(int move)   { return (move & 0xf000) >> 12; }
+constexpr int getPromo(int move)       { return (move & 0xf0000) >> 16; }
+constexpr int getEp(int move)          { return move & 0x400000; }
+constexpr int getCastle(int move)      { return move & 0x800000; }
+
+/// Hyperion squares count from a8 (0); Stockfish's from a1 (0): flip the rank.
+constexpr int mapSquare(int sq) { return sq ^ 56; }
+
+} // namespace
 
 namespace Stockfish {
 namespace Incremental {
 
+/// Per-thread NNUE position, its root state, search stack and game-history stack.
 thread_local Position global_pos;
 thread_local StateInfo global_si;
 thread_local std::vector<StateInfo> search_stack;
 thread_local size_t stack_ptr = 0;
 thread_local std::deque<StateInfo> setup_states;
 
+/// Hyperion piece code -> Stockfish piece code.
 static constexpr int g_to_sf_piece[12] = {
     1, 2,  3,  4,  5,  6,  // P N B R Q K -> W_PAWN..W_KING
     9, 10, 11, 12, 13, 14  // p n b r q k -> B_PAWN..B_KING
 };
 
+/// Converts a Hyperion piece code to a Stockfish `Piece` (`NO_PIECE` if out of range).
 inline Piece map_piece(int g_piece) {
     return (g_piece >= 0 && g_piece <= 11) ? Piece(g_to_sf_piece[g_piece]) : NO_PIECE;
 }
 
+/// Resets to the start position and sizes the search stack.
 void init() {
     setup_reset("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     search_stack.resize(2048);
     stack_ptr = 0;
 }
 
+/// Pushes `move` on the search stack.
 void push_state(int move) {
     StateInfo *si = &search_stack[stack_ptr++];
     do_move(move, si);
 }
 
+/// Pushes a null move on the search stack.
 void push_null_state() {
     StateInfo *si = &search_stack[stack_ptr++];
     do_null_move(si);
 }
 
+/// Pops the most recent search move.
 void pop_state(int move) {
     undo_move(move);
     --stack_ptr;
 }
 
+/// Applies a Hyperion move to the NNUE position, recording dirty pieces for the lazy accumulator update.
 void do_move(int move, StateInfo *new_si) {
     new_si->previous = global_pos.state();
 
@@ -70,8 +112,8 @@ void do_move(int move, StateInfo *new_si) {
     const int piece_idx = getMovePiece(move);
     const int promo_idx = getPromo(move);
 
-    const Square sf_from = Square(MAP_SQ(from));
-    const Square sf_to = Square(MAP_SQ(to));
+    const Square sf_from = Square(mapSquare(from));
+    const Square sf_to = Square(mapSquare(to));
     const Piece sf_piece = map_piece(piece_idx);
     const Piece sf_promo = map_piece(promo_idx);
 
@@ -155,6 +197,7 @@ void do_move(int move, StateInfo *new_si) {
     }
 }
 
+/// Flips the side to move without moving a piece.
 void do_null_move(StateInfo *new_si) {
     new_si->previous = global_pos.state();
     new_si->accumulatorBig.computed[WHITE] = false;
@@ -169,6 +212,7 @@ void do_null_move(StateInfo *new_si) {
     new_si->rule50 = new_si->previous->rule50 + 1;
 }
 
+/// Reverts the last move by replaying its dirty pieces backwards.
 void undo_move(int) {
     StateInfo *old_si = global_pos.state();
     StateInfo *prev_si = old_si->previous;
@@ -193,14 +237,17 @@ void undo_move(int) {
     global_pos.st = prev_si;
 }
 
+/// NNUE evaluation of the current position.
 int evaluate() {
     return Eval::evaluate(global_pos);
 }
 
+/// Hints the accumulator that sibling moves share this position as parent.
 void hint_common_parent() {
     Eval::NNUE::hint_common_parent_position(global_pos);
 }
 
+/// Sets the root position from `fen` and clears the setup history.
 void setup_reset(const std::string &fen) {
     setup_states.clear();
     setup_states.emplace_back();
@@ -209,25 +256,30 @@ void setup_reset(const std::string &fen) {
     stack_ptr = 0;
 }
 
+/// Plays a game-history move on the root position.
 void setup_move(int move) {
     setup_states.emplace_back();
     StateInfo *next = &setup_states.back();
     do_move(move, next);
 }
 
+/// Takes back a game-history move.
 void setup_undo(int move) {
     undo_move(move);
     setup_states.pop_back();
 }
 
+/// @return the thread-local NNUE position.
 const Position& get_global_pos() {
     return global_pos;
 }
 
+/// @return the thread-local setup (game-history) state stack.
 const std::deque<StateInfo>& get_setup_states() {
     return setup_states;
 }
 
+/// Clones the main thread's NNUE position and re-links its state chain for this helper thread.
 void sync_from_main_thread(const Position& main_pos, const std::deque<StateInfo>& main_setup) {
     setup_states = main_setup;
     std::memcpy(&global_pos, &main_pos, sizeof(Position));

@@ -1,7 +1,36 @@
 /*
   Hyperion - A Modern C++26 UCI Chess Engine
-  Copyright (C) 2026 Claudio M. Camacho
+  Copyright (C) 2026 Claudio M. Camacho <claudiomkd@gmail.com>
+
+  Hyperion is a successor of Gargantua, which is derived from Chess0 and
+  inspired by Code Monkey King's bbc-1.4.
+
+  This file is part of Hyperion.
+
+  Hyperion is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  Hyperion is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
+
+/**
+ * @file thread.h
+ * @brief Per-thread search state and the Lazy SMP thread pool.
+ *
+ * Every search thread owns a complete ThreadState: a private copy of the
+ * board, the history heuristics and the search stacks.  The `current_thread`
+ * thread-local pointer selects the active state, and the accessor macros at
+ * the bottom of this file (`bitboards`, `ply`, `history`, ...) expand to
+ * members of that state.  Only the transposition table is shared.
+ */
 
 #ifndef THREAD_H
 #define THREAD_H
@@ -19,10 +48,11 @@
 #endif
 #include <vector>
 
-inline constexpr int MaxPly = 256;
-inline constexpr int CorrHistSize = 16384;
-inline constexpr int CorrHistMask = CorrHistSize - 1;
+inline constexpr int MaxPly = 256;                      ///< Maximum search ply (stack size).
+inline constexpr int CorrHistSize = 16384;              ///< Entries per correction-history table.
+inline constexpr int CorrHistMask = CorrHistSize - 1;   ///< Index mask for correction history.
 
+/// Everything a search thread owns: its board copy, histories and search stacks.
 struct ThreadState {
     // Board state
     Bitboard bitboards[12];
@@ -61,6 +91,7 @@ struct ThreadState {
     bool allowNull;
     int nmp_min_ply;
 
+    /// Zeroes every learned heuristic table (used on `ucinewgame`).
     void clear_histories() noexcept {
         std::memset(killers, 0, sizeof(killers));
         std::memset(history, 0, sizeof(history));
@@ -71,6 +102,7 @@ struct ThreadState {
         std::memset(countermoves, 0, sizeof(countermoves));
     }
 
+    /// Prepares the search stacks for a new search and ages the butterfly history.
     void reset_search_state() noexcept {
         node_count = 0;
         seldepth = 0;
@@ -91,6 +123,7 @@ struct ThreadState {
                     history[s][f][t] /= 2;
     }
 
+    /// Copies the board (not the heuristics) from `src`, used to sync helper threads to the main thread.
     void copy_board_from(const ThreadState* src) noexcept {
         std::memcpy(bitboards, src->bitboards, sizeof(bitboards));
         std::memcpy(occupancies, src->occupancies, sizeof(occupancies));
@@ -111,14 +144,22 @@ struct ThreadState {
     }
 };
 
+/// A search worker running its own idle loop on a dedicated native thread.
 class Thread {
 public:
     explicit Thread(size_t n);
     virtual ~Thread();
 
+    /// Iterative-deepening search loop of a helper thread.
     virtual void search();
+
+    /// Thread body: sleeps until woken, syncs NNUE state, searches, then sleeps again.
     void idle_loop();
+
+    /// Wakes the thread to start searching.
     void start_searching();
+
+    /// Blocks until the thread has finished its current search.
     void wait_for_search_finished();
 
     ThreadState state{};
@@ -139,29 +180,46 @@ public:
     std::atomic<bool> synced{false};
 };
 
+/// The thread that owns the UCI position, prints `info` lines and reports `bestmove`.
 class MainThread : public Thread {
 public:
     explicit MainThread(size_t n) : Thread(n) {}
+
+    /// Iterative deepening with aspiration windows, time management and UCI output.
     void search() override;
 };
 
+/// Owns all search threads (index 0 is the MainThread).
 class ThreadPool {
 public:
+    /// Syncs every thread to the main thread's position and starts the search.
     void start_thinking();
+
+    /// Blocks until all threads are idle.
     void wait_for_search_finished();
+
+    /// Destroys all threads.
     void clear();
+
+    /// Clears the learned heuristics of every thread.
     void clear_histories();
+
+    /// Resizes the pool to `n` threads (at least one).
     void set(size_t n);
-    uint64_t nodes_searched() const noexcept;
+
+    /// @return the node count summed over all threads.
+    [[nodiscard]] uint64_t nodes_searched() const noexcept;
 
     std::vector<Thread*> threads;
 
     MainThread* main() noexcept { return static_cast<MainThread*>(threads.front()); }
 };
 
-extern ThreadPool Threads;
-extern thread_local ThreadState* current_thread;
+extern ThreadPool Threads;                               ///< The global thread pool.
+extern thread_local ThreadState* current_thread;         ///< State of the thread executing this code.
 
+// ---- Accessors for the active thread's state -------------------------------
+// Board state
 #define bitboards (current_thread->bitboards)
 #define occupancies (current_thread->occupancies)
 #define mailbox (current_thread->mailbox)
@@ -178,6 +236,7 @@ extern thread_local ThreadState* current_thread;
 #define repetition_index (current_thread->repetition_index)
 #define root_repetition_index (current_thread->root_repetition_index)
 
+// Search state
 #define nodes (current_thread->node_count)
 #define seldepth (current_thread->seldepth)
 #define killers (current_thread->killers)

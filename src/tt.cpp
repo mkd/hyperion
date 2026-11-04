@@ -1,17 +1,40 @@
 /*
   Hyperion - A Modern C++26 UCI Chess Engine
-  Copyright (C) 2026 Claudio M. Camacho
+  Copyright (C) 2026 Claudio M. Camacho <claudiomkd@gmail.com>
+
+  Hyperion is a successor of Gargantua, which is derived from Chess0 and
+  inspired by Code Monkey King's bbc-1.4.
+
+  This file is part of Hyperion.
+
+  Hyperion is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  Hyperion is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
+
+/**
+ * @file tt.cpp
+ * @brief Zobrist key generation and transposition table implementation.
+ */
 
 #include "tt.h"
 #include "bitboard.h"
 #include "position.h"
 #include "search.h"
+#include <cstddef>
 #include <cstdlib>
-#include <cstring>
-#include <iostream>
-
-using namespace std;
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 
 Bitboard piece_keys[12][64];
 Bitboard enpassant_keys[64];
@@ -22,6 +45,7 @@ uint64_t hash_cluster_count = 0ULL;
 TTCluster *hash_table = nullptr;
 uint8_t tt_generation = 0;
 
+/// Seeds the xorshift generator and fills all Zobrist tables.
 void initRandomKeys() {
     rng32_state = 1804289383;
     for (int piece = P; piece <= k; piece++)
@@ -37,6 +61,7 @@ void initRandomKeys() {
     side_key = rng64();
 }
 
+/// Computes the full position hash from scratch (pieces, en passant, castling, side).
 uint64_t generateHashkey() {
     uint64_t final_key = 0ULL;
     for (int piece = P; piece <= k; piece++) {
@@ -52,6 +77,7 @@ uint64_t generateHashkey() {
     return final_key;
 }
 
+/// Computes the pawn-structure hash from scratch.
 uint64_t generatePawnKey() {
     uint64_t key = 0ULL;
     Bitboard wp = bitboards[P];
@@ -61,6 +87,7 @@ uint64_t generatePawnKey() {
     return key;
 }
 
+/// Computes the hash of all non-pawn pieces (kings included) of `color`.
 uint64_t generateNonPawnKey(int color) {
     uint64_t key = 0ULL;
     const int start_p = (color == White) ? N : n;
@@ -73,10 +100,12 @@ uint64_t generateNonPawnKey(int color) {
     return key;
 }
 
+/// Advances the 5-bit generation counter used for age-based replacement.
 void TT::new_search() noexcept {
     tt_generation = static_cast<uint8_t>((tt_generation + 1) & 31);
 }
 
+/// Resets every entry to the empty state.
 void TT::clear() {
     if (!hash_table || hash_cluster_count == 0) return;
     for (uint64_t i = 0; i < hash_cluster_count; ++i) {
@@ -93,29 +122,50 @@ void TT::clear() {
     tt_generation = 0;
 }
 
+namespace {
+
+/// Allocates `bytes` of 64-byte aligned memory (portable across POSIX and Windows).
+void *allocateAligned(std::size_t bytes) noexcept {
+#if defined(_WIN32)
+    return _aligned_malloc(bytes, 64);
+#else
+    void *ptr = nullptr;
+    return (posix_memalign(&ptr, 64, bytes) == 0) ? ptr : nullptr;
+#endif
+}
+
+/// Releases memory obtained from allocateAligned().
+void freeAligned(void *ptr) noexcept {
+#if defined(_WIN32)
+    _aligned_free(ptr);
+#else
+    std::free(ptr);
+#endif
+}
+
+} // namespace
+
+/// Allocates a cache-line aligned table of `mb` MiB (at least 1) and clears it.
 void TT::init(uint32_t mb) {
-    if (mb < 1) mb = 1;
-    uint64_t hash_size = static_cast<uint64_t>(mb) * 1024ULL * 1024ULL;
+    if (mb < 1)
+        mb = 1;
+
+    const uint64_t hash_size = static_cast<uint64_t>(mb) * 1024ULL * 1024ULL;
     hash_cluster_count = hash_size / sizeof(TTCluster);
-    if (hash_cluster_count == 0) hash_cluster_count = 1;
+    if (hash_cluster_count == 0)
+        hash_cluster_count = 1;
 
     if (hash_table != nullptr) {
-        std::free(hash_table);
+        freeAligned(hash_table);
         hash_table = nullptr;
     }
 
-    void *ptr = nullptr;
-    if (posix_memalign(&ptr, 64, hash_cluster_count * sizeof(TTCluster)) == 0) {
-        hash_table = static_cast<TTCluster *>(ptr);
-    } else {
-        hash_table = static_cast<TTCluster *>(std::malloc(hash_cluster_count * sizeof(TTCluster)));
-    }
-
-    if (hash_table != nullptr) {
+    hash_table = static_cast<TTCluster *>(allocateAligned(hash_cluster_count * sizeof(TTCluster)));
+    if (hash_table != nullptr)
         TT::clear();
-    }
 }
 
+/// Looks the current position up in its cluster and refreshes the entry age on a hit.
 TTProbeResult TT::probe_ex(int alpha, int beta, int depth, bool pv_node) noexcept {
     TTProbeResult res{false, false, no_hash_found, ValueNone, 0, 0, hash_type_none, false};
     if (!hash_table || hash_cluster_count == 0) return res;
@@ -158,6 +208,7 @@ TTProbeResult TT::probe_ex(int alpha, int beta, int depth, bool pv_node) noexcep
     return res;
 }
 
+/// Convenience wrapper around probe_ex() for callers that only need score and move.
 int TT::probe(int alpha, int beta, int &best_move, int depth) noexcept {
     auto res = probe_ex(alpha, beta, depth, false);
     if (res.hit) {
@@ -167,6 +218,7 @@ int TT::probe(int alpha, int beta, int &best_move, int depth) noexcept {
     return no_hash_found;
 }
 
+/// Stores a result, replacing the lowest-priority entry (depth, age, PV) of the cluster.
 void TT::save(int score, int eval, int best_move, int depth, uint8_t bound, bool is_pv) noexcept {
     if (!hash_table || hash_cluster_count == 0) return;
 

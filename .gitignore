@@ -11,3 +11,9 @@ hyperion
 *~
 .vscode/
 .idea/
+
+# Build output
+build/
+dist/
+*.exe
+*.d

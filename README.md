@@ -49,7 +49,29 @@
 
 ## Building & Running
 
+### Native build
 ```bash
-make -j8
-./src/hyperion bench 12
+make -j
+./hyperion bench 12
+# Or simply:
+make bench
 ```
+
+### Cross-compilation
+```bash
+# Build for a specific target into dist/
+make TARGET=windows-x86_64
+make TARGET=linux-x86_64
+make TARGET=linux-arm64
+make TARGET=macos-x86_64
+
+# Build every target with an available toolchain
+make release
+```
+
+---
+
+## License
+
+Hyperion is licensed under the [GNU General Public License v3.0 or later](LICENSE).
+Author: Claudio M. Camacho <claudiomkd@gmail.com>

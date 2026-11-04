@@ -15,18 +15,20 @@
 
 ```text
 /Users/claudio/projects/Chess/hyperion/
-├── Makefile                        # Top-level Makefile (`make -j8`, `make clean`)
-├── README.md                       # Architecture & usage overview
+├── Makefile                        # Unified cross-platform & cross-compilation Makefile
+├── README.md                       # Architecture, usage & cross-compilation overview
+├── LICENSE                         # GNU General Public License v3.0
 ├── HANDOVER.md                     # This handover guide for new Antigravity sessions
-├── .gitignore                      # Ignores object files and compiled binaries
+├── .gitignore                      # Ignores build/, dist/, object files and binaries
+├── batch_positions_test.py         # Position suite tests
 ├── nn-b1a57edbea57.nnue            # Symlink -> src/nn-b1a57edbea57.nnue
 ├── nn-baff1ede1f90.nnue            # Symlink -> src/nn-baff1ede1f90.nnue
 └── src/
-    ├── Makefile                    # C++26 build rules with ARM64 NEON / x86_64 AVX2 detection
     ├── main.cpp                    # Engine initialization, CLI `bench [depth]` & `uci()` entry
     ├── bitboard.h / bitboard.cpp   # C++26 `consteval SqBB`, `std::popcount`, `std::countr_zero`, magic bitboards
     ├── position.h / position.cpp   # Board representation, incremental `mailbox[64]`, `pawn_key`, `non_pawn_key[2]`, fast draw/repetition detection
     ├── movgen.h / movgen.cpp       # Pseudo-legal move generators (`generateMoves`, `generateCapturesAndPromotions`, `generateQuietMoves`) & `makeMove`
+    ├── nnue.h                      # Clean C++ facade encapsulating the Stockfish incremental accumulator
     ├── tt.h / tt.cpp               # 64-byte cache-aligned 4-way bucketed `TTCluster` (16B `TTEntry_t`), 128-bit indexing, prefetch, static eval caching
     ├── thread.h / thread.cpp       # Lazy SMP `ThreadPool`, 16 MB `pthread` stacks, `ThreadState` with history & correction history tables
     ├── eval.h / eval.cpp           # NNUE evaluation wrapper, path auto-discovery, Pawn & Non-Pawn Correction History adjustment/update
@@ -100,7 +102,8 @@
 
 ## 4. Benchmarks & Match Verification vs Gargantua 2.1
 
-- **`./src/hyperion bench 12` (16 positions, 1 thread)**: `750,986` nodes in `545 ms` (**~1.38M – 1.64M NPS** single-threaded).
+- **`./hyperion bench 12` (16 positions, 1 thread)**: `897,947` nodes in `550 ms` (**~1.55M – 1.65M NPS** single-threaded).
+- **Cross-compilation**: Validated builds for Linux x86_64, Linux ARM64, macOS x86_64, macOS ARM64, and Windows x86_64 (`make release`).
 - **8-Thread Tactical Search**: Reaches **25M – 30.3M NPS** and solves `batch_positions.py` Position 1 (`M7`) at depth 32 in `952 ms` (continuing cleanly to depth 48+).
 - **Head-to-Head Matches vs Gargantua 2.1**:
   - **10 games @ `movetime = 0.1s/move`**: **10.0 / 10 (`+10 -0 =0`, 100% win rate)**

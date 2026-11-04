@@ -1,7 +1,36 @@
 /*
   Hyperion - A Modern C++26 UCI Chess Engine
-  Copyright (C) 2026 Claudio M. Camacho
+  Copyright (C) 2026 Claudio M. Camacho <claudiomkd@gmail.com>
+
+  Hyperion is a successor of Gargantua, which is derived from Chess0 and
+  inspired by Code Monkey King's bbc-1.4.
+
+  This file is part of Hyperion.
+
+  Hyperion is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  Hyperion is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
+
+/**
+ * @file bitboard.h
+ * @brief Bitboard primitives: board enums, masks, hardware bit intrinsics and
+ *        magic-bitboard slider attack lookups.
+ *
+ * Square numbering is "a8 = 0 ... h1 = 63" (rank 8 first), so a bitboard bit
+ * index equals the board square enum. Attack tables are filled once at start-up
+ * by initBitboards() and are read-only afterwards, hence safe to share across
+ * all search threads.
+ */
 
 #ifndef BITBOARD_H
 #define BITBOARD_H
@@ -11,13 +40,21 @@
 #include <cassert>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
+/// A set of squares: bit `n` is set when square `n` belongs to the set.
 using Bitboard = uint64_t;
 
+/// Side to move / piece colour. `Both` indexes the combined occupancy.
 enum Side { White, Black, Both, NoColor };
+
+/// Slider kind used when generating magic attack tables.
 enum Slider { Rook, Bishop };
+
+/// Piece codes: white pieces first (P..K), then black (p..k).
 enum Pieces { P, N, B, R, Q, K, p, n, b, r, q, k, NoPiece = -1 };
 
+/// Board squares in "a8 = 0 ... h1 = 63" order.
 enum BoardSquares {
     a8, b8, c8, d8, e8, f8, g8, h8,
     a7, b7, c7, d7, e7, f7, g7, h7,
@@ -30,7 +67,8 @@ enum BoardSquares {
     NoSq
 };
 
-inline const std::array<std::string, 65> SquareToCoordinates {
+/// Algebraic coordinates for each square (`"ns"` for NoSq).
+inline constexpr std::array<std::string_view, 65> SquareToCoordinates {
     "a8", "b8", "c8", "d8", "e8", "f8", "g8", "h8",
     "a7", "b7", "c7", "d7", "e7", "f7", "g7", "h7",
     "a6", "b6", "c6", "d6", "e6", "f6", "g6", "h6",
@@ -64,17 +102,28 @@ inline constexpr Bitboard Rank3_Mask = Rank8_Mask << (8 * 5);
 inline constexpr Bitboard Rank2_Mask = Rank8_Mask << (8 * 6);
 inline constexpr Bitboard Rank1_Mask = Rank8_Mask << (8 * 7);
 
-inline constexpr Bitboard NotFileA_Mask  = 18374403900871474942ULL;
-inline constexpr Bitboard NotFileH_Mask  = 9187201950435737471ULL;
-inline constexpr Bitboard NotFileHG_Mask = 4557430888798830399ULL;
-inline constexpr Bitboard NotFileAB_Mask = 18229723555195321596ULL;
+/// Masks used to stop leaper shifts from wrapping around the board edges.
+inline constexpr Bitboard NotFileA_Mask  = ~FileA_Mask;
+inline constexpr Bitboard NotFileH_Mask  = ~FileH_Mask;
+inline constexpr Bitboard NotFileHG_Mask = ~(FileG_Mask | FileH_Mask);
+inline constexpr Bitboard NotFileAB_Mask = ~(FileA_Mask | FileB_Mask);
 
-inline constexpr Bitboard FG1_Mask  = 6917529027641081856ULL;
-inline constexpr Bitboard FG8_Mask  = 96ULL;
-inline constexpr Bitboard DCB1_Mask = 1008806316530991104ULL;
-inline constexpr Bitboard DCB8_Mask = 14ULL;
+/// Squares that must be empty to castle (f1/g1, f8/g8 king side; b..d queen side).
+inline constexpr Bitboard FG1_Mask  = Rank1_Mask & (FileF_Mask | FileG_Mask);
+inline constexpr Bitboard FG8_Mask  = Rank8_Mask & (FileF_Mask | FileG_Mask);
+inline constexpr Bitboard DCB1_Mask = Rank1_Mask & (FileB_Mask | FileC_Mask | FileD_Mask);
+inline constexpr Bitboard DCB8_Mask = Rank8_Mask & (FileB_Mask | FileC_Mask | FileD_Mask);
 
-// C++26 consteval compile-time square bitboard lookup table
+static_assert(NotFileA_Mask  == 18374403900871474942ULL);
+static_assert(NotFileH_Mask  == 9187201950435737471ULL);
+static_assert(NotFileHG_Mask == 4557430888798830399ULL);
+static_assert(NotFileAB_Mask == 18229723555195321596ULL);
+static_assert(FG1_Mask  == 6917529027641081856ULL);
+static_assert(FG8_Mask  == 96ULL);
+static_assert(DCB1_Mask == 1008806316530991104ULL);
+static_assert(DCB8_Mask == 14ULL);
+
+/// Single-bit bitboard for each square, built at compile time (`SqBB[NoSq] == 0`).
 inline constexpr std::array<Bitboard, 65> SqBB = []() consteval {
     std::array<Bitboard, 65> arr{};
     for (int i = 0; i < 64; ++i)
@@ -83,19 +132,23 @@ inline constexpr std::array<Bitboard, 65> SqBB = []() consteval {
     return arr;
 }();
 
+// Precomputed leaper attack tables, indexed by [side][square] or [square].
 extern Bitboard PawnPushes[2][64];
 extern Bitboard PawnDoublePushes[2][64];
 extern Bitboard PawnAttacks[2][64];
 extern Bitboard KnightAttacks[64];
 extern Bitboard KingAttacks[64];
 
+// Magic-bitboard slider tables.
 extern Bitboard BishopMasks[64];
 extern Bitboard RookMasks[64];
 extern Bitboard BishopAttacks[64][512];
 extern Bitboard RookAttacks[64][4096];
 
+/// State of the xorshift32 generator used for Zobrist key generation.
 extern uint32_t rng32_state;
 
+/// Number of relevant occupancy bits per square for bishop magics.
 inline constexpr int BishopRelevantBits[64] = {
     6, 5, 5, 5, 5, 5, 5, 6,
     5, 5, 5, 5, 5, 5, 5, 5,
@@ -107,6 +160,7 @@ inline constexpr int BishopRelevantBits[64] = {
     6, 5, 5, 5, 5, 5, 5, 6
 };
 
+/// Number of relevant occupancy bits per square for rook magics.
 inline constexpr int RookRelevantBits[64] = {
     12, 11, 11, 11, 11, 11, 11, 12,
     11, 10, 10, 10, 10, 10, 10, 11,
@@ -118,6 +172,7 @@ inline constexpr int RookRelevantBits[64] = {
     12, 11, 11, 11, 11, 11, 11, 12
 };
 
+/// Pre-found rook magic multipliers (one per square).
 inline constexpr Bitboard RookMagicNumbers[64] = {
     0x8a80104000800020ULL, 0x140002000100040ULL,  0x2801880a0017001ULL,  0x100081001000420ULL,
     0x200020010080420ULL,  0x3001c0002010008ULL,  0x8480008002000100ULL, 0x2080088004402900ULL,
@@ -137,6 +192,7 @@ inline constexpr Bitboard RookMagicNumbers[64] = {
     0x20030a0244872ULL,    0x12001008414402ULL,   0x2006104900a0804ULL,  0x1004081002402ULL
 };
 
+/// Pre-found bishop magic multipliers (one per square).
 inline constexpr Bitboard BishopMagicNumbers[64] = {
     0x40040844404084ULL,   0x2004208a004208ULL,   0x10190041080202ULL,   0x108060845042010ULL,
     0x581104180800210ULL,  0x2112080446200010ULL, 0x1080820820060210ULL, 0x3c0808410220200ULL,
@@ -156,47 +212,69 @@ inline constexpr Bitboard BishopMagicNumbers[64] = {
     0x28000010020204ULL,   0x6000020202d0240ULL,  0x8918844842082200ULL, 0x4010011029020020ULL
 };
 
+/// Pretty-prints a bitboard as an 8x8 ASCII board (debugging aid).
 void printBitboard(Bitboard);
-Bitboard genPawnPush(int, int);
-Bitboard genPawnDoublePush(int, int);
-Bitboard maskBishopAttacks(int);
-Bitboard maskRookAttacks(int);
-Bitboard setOccupancy(int, int, Bitboard);
-void initBitmaps();
+
+/// Pawn single-push target of `square` for `side` (empty if off-board).
+Bitboard genPawnPush(int side, int square);
+
+/// Pawn double-push target of `square` for `side` (empty unless on the start rank).
+Bitboard genPawnDoublePush(int side, int square);
+
+/// Relevant (inner-board) bishop ray mask for `square`, excluding edges.
+Bitboard maskBishopAttacks(int square);
+
+/// Relevant (inner-board) rook ray mask for `square`, excluding edges.
+Bitboard maskRookAttacks(int square);
+
+/// Builds the `index`-th subset of `attackMask` (which has `bitMask` bits set).
+Bitboard setOccupancy(int index, int bitMask, Bitboard attackMask);
+
+/// Fills the leaper tables (pawn, knight, king attacks and pushes).
 void initLeaperAttacks();
+
+/// Fills the magic-bitboard table for the given slider kind.
 void initSliderAttacks(Slider);
+
+/// Initialises every attack table. Must be called once before any search.
 void initBitboards();
 
-constexpr int getBit(Bitboard b, int pos) noexcept {
+/// @return the bit of `b` at index `pos` (0 or 1).
+[[nodiscard]] constexpr int getBit(Bitboard b, int pos) noexcept {
     return int((b >> pos) & 1ULL);
 }
 
+/// Sets bit `pos` of `b`.
 constexpr void setBit(Bitboard &b, int pos) noexcept {
     b |= (1ULL << pos);
 }
 
+/// Clears bit `pos` of `b`.
 constexpr void popBit(Bitboard &b, int pos) noexcept {
     b &= ~(1ULL << pos);
 }
 
+/// Flips bit `pos` of `b`.
 constexpr void toggleBit(Bitboard &b, int pos) noexcept {
     b ^= (1ULL << pos);
 }
 
-constexpr bool moreThanOne(Bitboard b) noexcept {
+/// @return true when `b` has two or more bits set.
+[[nodiscard]] constexpr bool moreThanOne(Bitboard b) noexcept {
     return (b & (b - 1)) != 0;
 }
 
-// C++20/26 std::popcount hardware instruction
-constexpr int countBits(Bitboard bb) noexcept {
+/// Population count (hardware `popcnt` / `cnt`).
+[[nodiscard]] constexpr int countBits(Bitboard bb) noexcept {
     return std::popcount(bb);
 }
 
-// C++20/26 std::countr_zero hardware instruction
-constexpr unsigned int ls1b(Bitboard bb) noexcept {
+/// Index of the least significant set bit (undefined result when `bb == 0`).
+[[nodiscard]] constexpr unsigned int ls1b(Bitboard bb) noexcept {
     return static_cast<unsigned int>(std::countr_zero(bb));
 }
 
+/// Removes and returns the index of the least significant set bit of `b`.
 constexpr int popLsb(Bitboard &b) noexcept {
     assert(b);
     const int s = static_cast<int>(std::countr_zero(b));
@@ -204,25 +282,29 @@ constexpr int popLsb(Bitboard &b) noexcept {
     return s;
 }
 
-static inline Bitboard getBishopAttacks(int square, Bitboard occupancy) noexcept {
+/// Bishop attacks from `square` given board occupancy `occupancy` (magic lookup).
+[[nodiscard]] inline Bitboard getBishopAttacks(int square, Bitboard occupancy) noexcept {
     occupancy &= BishopMasks[square];
     occupancy *= BishopMagicNumbers[square];
     occupancy >>= 64 - BishopRelevantBits[square];
     return BishopAttacks[square][occupancy];
 }
 
-static inline Bitboard getRookAttacks(int square, Bitboard occupancy) noexcept {
+/// Rook attacks from `square` given board occupancy `occupancy` (magic lookup).
+[[nodiscard]] inline Bitboard getRookAttacks(int square, Bitboard occupancy) noexcept {
     occupancy &= RookMasks[square];
     occupancy *= RookMagicNumbers[square];
     occupancy >>= 64 - RookRelevantBits[square];
     return RookAttacks[square][occupancy];
 }
 
-static inline Bitboard getQueenAttacks(int square, Bitboard occupancy) noexcept {
+/// Queen attacks from `square`: union of bishop and rook attacks.
+[[nodiscard]] inline Bitboard getQueenAttacks(int square, Bitboard occupancy) noexcept {
     return getBishopAttacks(square, occupancy) | getRookAttacks(square, occupancy);
 }
 
-static inline uint32_t rng32() noexcept {
+/// Advances the xorshift32 generator and returns the next 32-bit value.
+inline uint32_t rng32() noexcept {
     uint32_t number = rng32_state;
     number ^= number << 13;
     number ^= number >> 17;
@@ -231,7 +313,8 @@ static inline uint32_t rng32() noexcept {
     return number;
 }
 
-static inline uint64_t rng64() noexcept {
+/// Builds a 64-bit pseudo-random value from four 16-bit xorshift32 samples.
+inline uint64_t rng64() noexcept {
     const uint64_t n1 = uint64_t(rng32() & 0xFFFF);
     const uint64_t n2 = uint64_t(rng32() & 0xFFFF);
     const uint64_t n3 = uint64_t(rng32() & 0xFFFF);

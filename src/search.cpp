@@ -1,7 +1,35 @@
 /*
   Hyperion - A Modern C++26 UCI Chess Engine
-  Copyright (C) 2026 Claudio M. Camacho
+  Copyright (C) 2026 Claudio M. Camacho <claudiomkd@gmail.com>
+
+  Hyperion is a successor of Gargantua, which is derived from Chess0 and
+  inspired by Code Monkey King's bbc-1.4.
+
+  This file is part of Hyperion.
+
+  Hyperion is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  Hyperion is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
+
+/**
+ * @file search.cpp
+ * @brief The search: principal-variation alpha-beta (`negamax`), quiescence
+ *        search, static exchange evaluation, move ordering, history updates,
+ *        iterative deepening with aspiration windows, and time management.
+ *
+ * All functions here run on the thread selected by `current_thread`; the board
+ * and heuristic tables they touch are that thread's private copy.
+ */
 
 #include "search.h"
 #include "bitboard.h"
@@ -17,18 +45,19 @@
 #include <cstring>
 #include <iostream>
 
-using namespace std;
-
 Limits_t Limits;
 
+/// Late-move-reduction table, indexed by [depth][move number] (filled by initLMR()).
 static int LMRTable[MaxSearchDepth][64];
 
+/// Piece values used by static exchange evaluation (index 12 = empty square).
 static constexpr int see_piece_values[13] = {
     100, 300, 310, 500, 950, 20000,
     100, 300, 310, 500, 950, 20000,
     0
 };
 
+/// Victim values (indexed by piece type) used for MVV-LVA capture ordering.
 static constexpr int mvv_victim_score[6] = {
     100, 300, 310, 500, 950, 10000
 };
@@ -41,18 +70,21 @@ void initLMR() noexcept {
     }
 }
 
-static inline void checkTime() noexcept {
+/// Raises the global stop flag once the hard time limit has been reached.
+static void checkTime() noexcept {
     if (Limits.timeset && getTimeMs() >= Limits.max_stoptime) {
         Limits.stopped.store(true, std::memory_order_relaxed);
     }
 }
 
-static inline void updateHistoryStat(int &entry, int bonus) noexcept {
+/// Stockfish-style "gravity" update: moves `entry` towards `bonus` while keeping it bounded by MaxHistory.
+static void updateHistoryStat(int &entry, int bonus) noexcept {
     const int clamped = std::clamp(bonus, -MaxHistory, MaxHistory);
     entry += clamped - entry * std::abs(clamped) / MaxHistory;
 }
 
-static inline void updateQuietHistory(int move, int bonus) noexcept {
+/// Applies `bonus` to the butterfly history and to the 1-ply and 2-ply continuation histories of a quiet move.
+static void updateQuietHistory(int move, int bonus) noexcept {
     const int from  = getMoveSource(move);
     const int to    = getMoveTarget(move);
     const int piece = getMovePiece(move);
@@ -69,74 +101,63 @@ static inline void updateQuietHistory(int move, int bonus) noexcept {
     }
 }
 
-static inline int getCapturedPieceType(int move) noexcept {
+/// @return the type of the piece captured by `move` (a pawn for en passant or non-captures).
+static int getCapturedPieceType(int move) noexcept {
     if (getEp(move)) return P;
     const int cap = mailbox[getMoveTarget(move)];
     return (cap != NoPiece) ? pieceType(cap) : P;
 }
 
-static inline void updateCaptureHistory(int move, int bonus) noexcept {
+/// Applies `bonus` to the capture history entry of `move`.
+static void updateCaptureHistory(int move, int bonus) noexcept {
     const int piece   = getMovePiece(move);
     const int to      = getMoveTarget(move);
     const int capType = getCapturedPieceType(move);
     updateHistoryStat(capture_history[piece][to][capType], bonus);
 }
 
-static inline Bitboard getSmallestAttacker(int sq, int side, int &attackerPiece) noexcept {
-    if (side == White) {
-        if (Bitboard bb = PawnAttacks[Black][sq] & bitboards[P]) {
-            attackerPiece = P;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = KnightAttacks[sq] & bitboards[N]) {
-            attackerPiece = N;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = getBishopAttacks(sq, occupancies[Both]) & bitboards[B]) {
-            attackerPiece = B;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = getRookAttacks(sq, occupancies[Both]) & bitboards[R]) {
-            attackerPiece = R;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = (getBishopAttacks(sq, occupancies[Both]) | getRookAttacks(sq, occupancies[Both])) & bitboards[Q]) {
-            attackerPiece = Q;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = KingAttacks[sq] & bitboards[K]) {
-            attackerPiece = K;
-            return SqBB[ls1b(bb)];
-        }
-    } else {
-        if (Bitboard bb = PawnAttacks[White][sq] & bitboards[p]) {
-            attackerPiece = p;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = KnightAttacks[sq] & bitboards[n]) {
-            attackerPiece = n;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = getBishopAttacks(sq, occupancies[Both]) & bitboards[b]) {
-            attackerPiece = b;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = getRookAttacks(sq, occupancies[Both]) & bitboards[r]) {
-            attackerPiece = r;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = (getBishopAttacks(sq, occupancies[Both]) | getRookAttacks(sq, occupancies[Both])) & bitboards[q]) {
-            attackerPiece = q;
-            return SqBB[ls1b(bb)];
-        }
-        if (Bitboard bb = KingAttacks[sq] & bitboards[k]) {
-            attackerPiece = k;
-            return SqBB[ls1b(bb)];
-        }
+/**
+ * Finds the least valuable piece of colour `side` attacking `sq` given the
+ * current occupancy.
+ * @param[out] attackerPiece piece code of the attacker found
+ * @return single-bit bitboard of the attacker, or 0 if there is none
+ */
+static Bitboard getSmallestAttacker(int sq, int side, int &attackerPiece) noexcept {
+    const int off = (side == White) ? 0 : 6; // piece-code offset of `side`
+    const Bitboard occ = occupancies[Both];
+
+    if (const Bitboard bb = PawnAttacks[side ^ 1][sq] & bitboards[P + off]) {
+        attackerPiece = P + off;
+        return SqBB[ls1b(bb)];
+    }
+    if (const Bitboard bb = KnightAttacks[sq] & bitboards[N + off]) {
+        attackerPiece = N + off;
+        return SqBB[ls1b(bb)];
+    }
+    if (const Bitboard bb = getBishopAttacks(sq, occ) & bitboards[B + off]) {
+        attackerPiece = B + off;
+        return SqBB[ls1b(bb)];
+    }
+    if (const Bitboard bb = getRookAttacks(sq, occ) & bitboards[R + off]) {
+        attackerPiece = R + off;
+        return SqBB[ls1b(bb)];
+    }
+    if (const Bitboard bb = (getBishopAttacks(sq, occ) | getRookAttacks(sq, occ)) & bitboards[Q + off]) {
+        attackerPiece = Q + off;
+        return SqBB[ls1b(bb)];
+    }
+    if (const Bitboard bb = KingAttacks[sq] & bitboards[K + off]) {
+        attackerPiece = K + off;
+        return SqBB[ls1b(bb)];
     }
     return 0ULL;
 }
 
+/**
+ * Static exchange evaluation: the material outcome (centipawns) of the capture
+ * sequence started by `move` on its target square, assuming both sides always
+ * recapture with their least valuable attacker and may stop at any time.
+ */
 int see(int move) noexcept {
     if (getCastle(move)) return 0;
 
@@ -213,6 +234,10 @@ int see(int move) noexcept {
     return gain[0];
 }
 
+/**
+ * @return true when see(move) >= threshold.  Cheap upper/lower bounds are
+ *         checked first so the full exchange is only simulated when needed.
+ */
 bool see_ge(int move, int threshold) noexcept {
     if (getCastle(move)) return 0 >= threshold;
 
@@ -245,6 +270,11 @@ bool see_ge(int move, int threshold) noexcept {
     return see(move) >= threshold;
 }
 
+/**
+ * Assigns an ordering score to `move`: PV move, TT move, good captures
+ * (MVV-LVA + capture history, SEE-filtered), killers, countermove, quiet
+ * history, and finally losing captures.
+ */
 int scoreMove(int move, int tt_move) noexcept {
     if (scorePV && move == pv_table[0][ply])
         return 3500000;
@@ -316,7 +346,8 @@ int scoreMove(int move, int tt_move) noexcept {
     return std::clamp(h, -400000, 750000);
 }
 
-static inline int pickNextMove(MoveList_t &moveList, int *scores, int startIdx) noexcept {
+/// Selection-sort step: swaps the best-scored remaining move into `startIdx` and returns it.
+static int pickNextMove(MoveList_t &moveList, int *scores, int startIdx) noexcept {
     int bestIdx = startIdx;
     int bestScore = scores[startIdx];
     for (int i = startIdx + 1; i < moveList.count; ++i) {
@@ -332,7 +363,8 @@ static inline int pickNextMove(MoveList_t &moveList, int *scores, int startIdx) 
     return moveList.moves[startIdx];
 }
 
-static inline void enablePVScoring(MoveList_t &moveList) noexcept {
+/// While following the previous iteration's PV, enables PV-move scoring if the PV move is in the list.
+static void enablePVScoring(MoveList_t &moveList) noexcept {
     followPV = false;
     for (int i = 0; i < moveList.count; ++i) {
         if (pv_table[0][ply] == moveList.moves[i]) {
@@ -343,6 +375,10 @@ static inline void enablePVScoring(MoveList_t &moveList) noexcept {
     }
 }
 
+/**
+ * Quiescence search: resolves captures and promotions (all evasions when in
+ * check) until the position is quiet, so the static evaluation is reliable.
+ */
 int qsearch(int alpha, int beta) {
     if ((++nodes & 1023) == 0)
         checkTime();
@@ -455,13 +491,13 @@ int qsearch(int alpha, int beta) {
                 continue;
         }
 
-        saveBoard();
+        const BoardSnapshot snapshot;
         if (!makeMove(move)) {
-            takeBack(move);
+            snapshot.restore();
             continue;
         }
 
-        NNUE_DO(move);
+        Nnue::doMove(move);
         TT::prefetch(hash_key);
 
         legal_moves++;
@@ -474,8 +510,8 @@ int qsearch(int alpha, int beta) {
 
         ply--;
         repetition_index--;
-        takeBack(move);
-        NNUE_UNDO(move);
+        snapshot.restore();
+        Nnue::undoMove(move);
 
         if (Limits.stopped.load(std::memory_order_relaxed))
             return 0;
@@ -512,6 +548,15 @@ int qsearch(int alpha, int beta) {
     return best_score;
 }
 
+/**
+ * Principal-variation alpha-beta search in negamax form.
+ *
+ * @param alpha,beta   search window (fail-soft)
+ * @param depth        remaining depth in plies
+ * @param cut_node     expected to fail high (used by reductions and IIR)
+ * @param excludedMove move to skip (singular-extension verification), or 0
+ * @return the score from the side-to-move's point of view
+ */
 int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
     if ((++nodes & 1023) == 0)
         checkTime();
@@ -662,8 +707,8 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
             depth >= 3 && eval >= beta && static_eval >= beta - 20 * depth + 170 &&
             !noMajorsOrMinors()) {
 
-            saveBoard();
-            NNUE_DO_NULL;
+            const BoardSnapshot snapshot;
+            Nnue::doNullMove();
 
             current_move[ply] = 0;
             ply++;
@@ -685,8 +730,8 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
 
             ply--;
             repetition_index--;
-            takeBack(0);
-            NNUE_UNDO_NULL;
+            snapshot.restore();
+            Nnue::undoNullMove();
 
             if (Limits.stopped.load(std::memory_order_relaxed))
                 return 0;
@@ -726,13 +771,13 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
                     if (!see_ge(move, probBeta - static_eval))
                         continue;
 
-                    saveBoard();
+                    const BoardSnapshot snapshot;
                     if (!makeMove(move)) {
-                        takeBack(move);
+                        snapshot.restore();
                         continue;
                     }
 
-                    NNUE_DO(move);
+                    Nnue::doMove(move);
                     TT::prefetch(hash_key);
 
                     nodes++;
@@ -748,8 +793,8 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
 
                     ply--;
                     repetition_index--;
-                    takeBack(move);
-                    NNUE_UNDO(move);
+                    snapshot.restore();
+                    Nnue::undoMove(move);
 
                     if (Limits.stopped.load(std::memory_order_relaxed))
                         return 0;
@@ -768,6 +813,7 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
         }
     }
 
+// ---- Main move loop ------------------------------------------------------
 moves_loop:
     const bool improving = (!inCheck && ply >= 2 && static_eval_stack[ply - 2] != ValueNone)
         ? (static_eval > static_eval_stack[ply - 2])
@@ -785,11 +831,8 @@ moves_loop:
         move_scores[i] = scoreMove(moveList.moves[i], bestmove);
     }
 
-#ifdef USE_NEW_NNUE
-    if (moveList.count > 1) {
-        Stockfish::Incremental::hint_common_parent();
-    }
-#endif
+    if (moveList.count > 1)
+        Nnue::hintCommonParent();
 
     int best_score = -Infinity;
     uint8_t hash_flag = hash_type_alpha;
@@ -886,13 +929,13 @@ moves_loop:
             }
         }
 
-        saveBoard();
+        const BoardSnapshot snapshot;
         if (!makeMove(move)) {
-            takeBack(move);
+            snapshot.restore();
             continue;
         }
 
-        NNUE_DO(move);
+        Nnue::doMove(move);
         TT::prefetch(hash_key);
 
         legal_moves++;
@@ -904,6 +947,8 @@ moves_loop:
         const int new_depth = depth - 1 + extension;
         int score = 0;
 
+        // PVS: the first move gets a full window; later moves are searched with a
+        // null window (and late-move reductions), then re-searched on a fail-high.
         if (moves_searched == 0) {
             score = -negamax(-beta, -alpha, new_depth, ! (pv_node || !cut_node));
         } else {
@@ -936,8 +981,8 @@ moves_loop:
 
         ply--;
         repetition_index--;
-        takeBack(move);
-        NNUE_UNDO(move);
+        snapshot.restore();
+        Nnue::undoMove(move);
 
         if (Limits.stopped.load(std::memory_order_relaxed))
             return 0;
@@ -962,6 +1007,7 @@ moves_loop:
                 if (score >= beta) {
                     hash_flag = hash_type_beta;
 
+                    // Beta cutoff: reward the cutoff move and penalise the moves tried before it.
                     const int bonus = std::min(2000, 16 * depth * depth + 32 * depth + 16);
 
                     if (is_quiet) {
@@ -998,6 +1044,7 @@ moves_loop:
         }
     }
 
+    // No legal move: checkmate or stalemate (or a failed singular search).
     if (legal_moves == 0) {
         if (excludedMove)
             return alpha;
@@ -1009,6 +1056,7 @@ moves_loop:
     if (!excludedMove && !Limits.stopped.load(std::memory_order_relaxed)) {
         TT::save(best_score, raw_eval, bestmove, depth, hash_flag, tt_pv);
 
+        // Learn how far the static eval was from the search result.
         if (!inCheck &&
             !(bestmove && (getMoveCapture(bestmove) || getPromo(bestmove))) &&
             std::abs(best_score) < MateScore &&
@@ -1022,6 +1070,7 @@ moves_loop:
     return best_score;
 }
 
+/// Helper-thread loop: plain iterative deepening (no output), staggered start depth for diversity.
 void Thread::search() {
     current_thread = &this->state;
     current_thread->reset_search_state();
@@ -1034,6 +1083,11 @@ void Thread::search() {
     }
 }
 
+/**
+ * Main-thread iterative deepening: aspiration windows around the previous
+ * score, `info` output after each iteration, soft/hard time management scaled
+ * by best-move stability and score drops, and the final `bestmove` report.
+ */
 void MainThread::search() {
     current_thread = &this->state;
     current_thread->reset_search_state();
@@ -1049,13 +1103,13 @@ void MainThread::search() {
         rootMoves.count = 0;
         generateMoves(rootMoves);
         for (int i = 0; i < rootMoves.count; ++i) {
-            saveBoard();
+            const BoardSnapshot snapshot;
             if (makeMove(rootMoves.moves[i])) {
                 best_root_move = rootMoves.moves[i];
-                takeBack(rootMoves.moves[i]);
+                snapshot.restore();
                 break;
             }
-            takeBack(rootMoves.moves[i]);
+            snapshot.restore();
         }
     }
 
@@ -1191,6 +1245,7 @@ void MainThread::search() {
     std::cout << "\n" << std::flush;
 }
 
+/// Starts a search on all threads using the current global Limits.
 void search() {
     Threads.start_thinking();
 }

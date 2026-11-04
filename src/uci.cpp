@@ -1,12 +1,36 @@
 /*
   Hyperion - A Modern C++26 UCI Chess Engine
-  Copyright (C) 2026 Claudio M. Camacho
+  Copyright (C) 2026 Claudio M. Camacho <claudiomkd@gmail.com>
+
+  Hyperion is a successor of Gargantua, which is derived from Chess0 and
+  inspired by Code Monkey King's bbc-1.4.
+
+  This file is part of Hyperion.
+
+  Hyperion is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  Hyperion is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
+
+/**
+ * @file uci.cpp
+ * @brief UCI command loop, `go` time budgeting, perft and the bench suite.
+ */
 
 #include "uci.h"
 #include "bitboard.h"
 #include "eval.h"
 #include "movgen.h"
+#include "nnue.h"
 #include "position.h"
 #include "search.h"
 #include "tbprobe.h"
@@ -17,25 +41,11 @@
 #include <sstream>
 #include <vector>
 
-#ifdef USE_NEW_NNUE
-#pragma push_macro("ply")
-#pragma push_macro("sideToMove")
-#undef ply
-#undef sideToMove
-#include "stockfish_probe/nnue_incremental.h"
-#pragma pop_macro("sideToMove")
-#pragma pop_macro("ply")
-#define NNUE_SETUP_MOVE(m) Stockfish::Incremental::setup_move(m);
-#define NNUE_SETUP_UNDO(m) Stockfish::Incremental::setup_undo(m);
-#else
-#define NNUE_SETUP_MOVE(m)
-#define NNUE_SETUP_UNDO(m)
-#endif
-
-using namespace std;
+using std::cin, std::cout, std::flush, std::getline, std::istringstream, std::string, std::to_string, std::vector, std::ws;
 
 uint64_t perft_nodes = 0;
 
+/// Recursive perft: counts leaf nodes, verifying legality with makeMove().
 void perft_driver(int depth) {
     if (depth == 0) {
         perft_nodes++;
@@ -47,16 +57,17 @@ void perft_driver(int depth) {
     generateMoves(moveList);
 
     for (int move_count = 0; move_count < moveList.count; ++move_count) {
-        saveBoard();
+        const BoardSnapshot snapshot;
         if (!makeMove(moveList.moves[move_count])) {
-            takeBack(moveList.moves[move_count]);
+            snapshot.restore();
             continue;
         }
         perft_driver(depth - 1);
-        takeBack(moveList.moves[move_count]);
+        snapshot.restore();
     }
 }
 
+/// Root perft split ("divide"): prints the node count below each legal root move.
 void perft_test(int depth) {
     cout << "\n     Performance test\n\n";
 
@@ -67,9 +78,9 @@ void perft_test(int depth) {
     const uint64_t start = getTimeMs();
 
     for (int move_count = 0; move_count < moveList.count; ++move_count) {
-        saveBoard();
+        const BoardSnapshot snapshot;
         if (!makeMove(moveList.moves[move_count])) {
-            takeBack(moveList.moves[move_count]);
+            snapshot.restore();
             continue;
         }
 
@@ -77,7 +88,7 @@ void perft_test(int depth) {
         perft_driver(depth - 1);
         const uint64_t old_nodes = perft_nodes - cum_nodes;
 
-        takeBack(moveList.moves[move_count]);
+        snapshot.restore();
 
         cout << "     move: " << SquareToCoordinates[getMoveSource(moveList.moves[move_count])]
              << SquareToCoordinates[getMoveTarget(moveList.moves[move_count])];
@@ -93,8 +104,10 @@ void perft_test(int depth) {
     cout << "\n      NPS: " << (perft_nodes * 1000ULL) / elapsed << "\n\n";
 }
 
+/// Matches `move_str` against the legal moves of the current position (0 if none matches).
 int parseMove(const string &move_str) {
-    if (move_str.length() < 4) return 0;
+    if (move_str.length() < 4)
+        return 0;
 
     MoveList_t moveList;
     moveList.count = 0;
@@ -105,29 +118,25 @@ int parseMove(const string &move_str) {
 
     for (int count = 0; count < moveList.count; ++count) {
         const int move = moveList.moves[count];
-        if (getMoveSource(move) == fromSq && getMoveTarget(move) == toSq) {
-            const int promo = getPromo(move);
-            if (promo) {
-                if (move_str.length() < 5) continue;
-                if ((promo == Q || promo == q) && move_str[4] == 'q') goto check_legal;
-                if ((promo == R || promo == r) && move_str[4] == 'r') goto check_legal;
-                if ((promo == B || promo == b) && move_str[4] == 'b') goto check_legal;
-                if ((promo == N || promo == n) && move_str[4] == 'n') goto check_legal;
+        if (getMoveSource(move) != fromSq || getMoveTarget(move) != toSq)
+            continue;
+
+        // A promotion move must carry the matching promotion letter.
+        if (const int promo = getPromo(move); promo) {
+            if (move_str.length() < 5 || promoChar(promo) != move_str[4])
                 continue;
-            }
-        check_legal:
-            saveBoard();
-            if (makeMove(move)) {
-                takeBack(move);
-                return move;
-            }
-            takeBack(move);
-            return 0;
         }
+
+        // Accept the move only if it is legal.
+        const BoardSnapshot snapshot;
+        const bool legal = makeMove(move);
+        snapshot.restore();
+        return legal ? move : 0;
     }
     return 0;
 }
 
+/// Sets up the root position from `position startpos|fen ... [moves ...]`, keeping NNUE and repetition history in sync.
 void parsePosition(const string &command) {
     Threads.wait_for_search_finished();
     current_thread = &Threads.main()->state;
@@ -155,7 +164,7 @@ void parsePosition(const string &command) {
         while (ss >> token) {
             const int move = parseMove(token);
             if (!move) break;
-            NNUE_SETUP_MOVE(move);
+            Nnue::setupMove(move);
             makeMove(move);
             repetition_index++;
             repetition_table[repetition_index] = hash_key;
@@ -165,6 +174,10 @@ void parsePosition(const string &command) {
     root_repetition_index = repetition_index;
 }
 
+/**
+ * Parses `go` arguments, derives the soft (optimum) and hard (maximum) time
+ * limits from the clock, increment and moves-to-go, and starts the search.
+ */
 void parseGo(const string &line) {
     Threads.wait_for_search_finished();
     current_thread = &Threads.main()->state;
@@ -251,6 +264,7 @@ void parseGo(const string &line) {
     search();
 }
 
+/// Fixed-depth search over 16 benchmark positions; the node count is a regression fingerprint.
 void bench(int depth) {
     static const vector<string> bench_fens = {
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -296,6 +310,7 @@ void bench(int depth) {
     cout << "========================================\n" << flush;
 }
 
+/// UCI main loop (isready, position, go, stop, setoption, ... plus debug commands `d`, `eval`, `flip`, `bench`).
 void uci() {
     string input;
     while (getline(cin, input)) {
