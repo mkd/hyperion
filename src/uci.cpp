@@ -193,6 +193,7 @@ void parseGo(const string &line) {
     Limits.movetime     = -1;
     Limits.movestogo    = 0;
     Limits.timeset      = false;
+    Limits.ponder.store(false, std::memory_order_relaxed);
     Limits.stopped.store(false, std::memory_order_relaxed);
     Limits.quit         = 0;
 
@@ -203,6 +204,8 @@ void parseGo(const string &line) {
     while (ss >> token) {
         if (token == "infinite") {
             Limits.timeset = false;
+        } else if (token == "ponder") {
+            Limits.ponder.store(true, std::memory_order_relaxed);
         } else if (token == "wtime" && sideToMove == White) {
             ss >> Limits.time;
         } else if (token == "btime" && sideToMove == Black) {
@@ -347,8 +350,19 @@ void uci() {
         } else if (token == "go") {
             parseGo(input);
         } else if (token == "stop") {
+            Limits.ponder.store(false, std::memory_order_relaxed);
             Limits.stopped.store(true, std::memory_order_relaxed);
             Threads.wait_for_search_finished();
+        } else if (token == "ponderhit") {
+            if (Limits.ponder.load(std::memory_order_relaxed)) {
+                Limits.ponder.store(false, std::memory_order_release);
+                const uint64_t now = getTimeMs();
+                const uint64_t elapsed = now - Limits.starttime;
+                Limits.starttime = now;
+                Limits.opt_stoptime += elapsed;
+                Limits.max_stoptime += elapsed;
+                Limits.stoptime     = Limits.max_stoptime;
+            }
         } else if (token == "quit") {
             if (!Limits.timeset && Limits.depth >= MaxSearchDepth - 1) {
                 Limits.stopped.store(true, std::memory_order_relaxed);
@@ -363,6 +377,7 @@ void uci() {
             cout << "option name Threads type spin default 1 min 1 max 1024\n";
             cout << "option name MultiPV type spin default " << DefaultMultiPV
                  << " min " << MinMultiPV << " max " << MaxMultiPV << "\n";
+            cout << "option name Ponder type check default false\n";
             cout << "option name SyzygyPath type string default " << SyzygyPath << "\n";
             cout << "uciok\n" << flush;
         } else if (token == "setoption") {
@@ -387,6 +402,9 @@ void uci() {
                 int mpv = DefaultMultiPV;
                 ss >> val_tok >> mpv;
                 MultiPV = std::clamp(mpv, MinMultiPV, MaxMultiPV);
+            } else if (opt_name == "Ponder") {
+                string val_tok, val;
+                ss >> val_tok >> val;
             } else if (opt_name == "SyzygyPath") {
                 string val_tok, path;
                 ss >> val_tok; // "value"

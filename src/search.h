@@ -59,6 +59,7 @@ struct Limits_t {
     int movetime          = -1;     ///< `go movetime`, or -1 when unset.
     int movestogo         = 0;      ///< Moves to the next time control (0 = sudden death).
     bool timeset          = false;  ///< True when the search is time-limited.
+    std::atomic<bool> ponder{false};  ///< True when searching in ponder mode.
     std::atomic<bool> stopped{false}; ///< Set to abort all threads.
     int quit              = 0;
 };

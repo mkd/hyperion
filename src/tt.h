@@ -145,17 +145,17 @@ int probe(int alpha, int beta, int &best_move, int depth) noexcept;
 /// Stores a search result for the current position (`hash_key`).
 void save(int score, int eval, int best_move, int depth, uint8_t bound, bool is_pv) noexcept;
 
-/// @return the fill ratio of the table in permille, sampled on up to 250 clusters.
+/// @return the fill ratio of the table in permille, sampled on up to 1000 clusters.
 [[nodiscard]] inline int hashfull() noexcept {
     if (hash_cluster_count == 0 || !hash_table)
         return 0;
 
     int cnt = 0;
-    const uint64_t sample_clusters = (hash_cluster_count > 250) ? 250 : hash_cluster_count;
+    const uint64_t sample_clusters = (hash_cluster_count > 1000) ? 1000 : hash_cluster_count;
     for (uint64_t i = 0; i < sample_clusters; ++i) {
         for (int j = 0; j < ClusterSize; ++j) {
             const TTEntry_t &e = hash_table[i].entry[j];
-            if (e.bound() != hash_type_none && e.gen() == tt_generation)
+            if (e.bound() != hash_type_none)
                 ++cnt;
         }
     }

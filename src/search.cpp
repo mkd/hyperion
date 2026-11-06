@@ -44,12 +44,29 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <thread>
 
 Limits_t Limits;
 
 int MultiPV = DefaultMultiPV;
 
 namespace {
+
+inline void print_score(std::ostream &os, int score) {
+    if (score > MateScore && score <= MateValue) {
+        os << "score mate " << (MateValue - score) / 2 + 1 << " ";
+    } else if (score >= -MateValue && score < -MateScore) {
+        os << "score mate " << -(score + MateValue) / 2 - 1 << " ";
+    } else if (score > TBWinScore - MaxPly && score <= TBWinScore) {
+        const int dist = std::max(1, (TBWinScore - score + 1) / 2);
+        os << "score mate " << dist << " ";
+    } else if (score >= -TBWinScore && score < -TBWinScore + MaxPly) {
+        const int dist = std::max(1, (score - (-TBWinScore) + 1) / 2);
+        os << "score mate -" << dist << " ";
+    } else {
+        os << "score cp " << score << " ";
+    }
+}
 
 inline uint64_t to_fathom_bb(uint64_t bb) noexcept {
     return __builtin_bswap64(bb);
@@ -92,6 +109,8 @@ void initLMR() noexcept {
 
 /// Raises the global stop flag once the hard time limit has been reached.
 static void checkTime() noexcept {
+    if (Limits.ponder.load(std::memory_order_relaxed))
+        return;
     if (Limits.timeset && getTimeMs() >= Limits.max_stoptime) {
         Limits.stopped.store(true, std::memory_order_relaxed);
     }
@@ -1373,37 +1392,28 @@ void MainThread::search() {
         const int num_to_report = std::min(root_multipv, tb_count);
         if (num_to_report > 1) {
             for (int pvi = 0; pvi < num_to_report; ++pvi) {
-                const int pvi_score = all_tb_results[pvi].score;
-                std::cout << "info depth 1 seldepth 1 multipv " << (pvi + 1)
-                          << " score ";
-                if (pvi_score > -MateValue && pvi_score < -MateScore) {
-                    std::cout << "mate " << -(pvi_score + MateValue) / 2 - 1 << " ";
-                } else if (pvi_score > MateScore && pvi_score < MateValue) {
-                    std::cout << "mate " << (MateValue - pvi_score) / 2 + 1 << " ";
-                } else {
-                    std::cout << "cp " << pvi_score << " ";
-                }
+                std::cout << "info depth 1 seldepth 1 multipv " << (pvi + 1) << " ";
+                print_score(std::cout, all_tb_results[pvi].score);
                 std::cout << "nodes 1 nps 1000 tbhits 1 time 0 pv ";
                 printMove(all_tb_results[pvi].move);
                 std::cout << "\n";
             }
             std::cout << std::flush;
         } else {
-            const int pvi_score = root_tb_res.score;
-            std::cout << "info depth 1 seldepth 1 score ";
-            if (pvi_score > -MateValue && pvi_score < -MateScore) {
-                std::cout << "mate " << -(pvi_score + MateValue) / 2 - 1 << " ";
-            } else if (pvi_score > MateScore && pvi_score < MateValue) {
-                std::cout << "mate " << (MateValue - pvi_score) / 2 + 1 << " ";
-            } else {
-                std::cout << "cp " << pvi_score << " ";
-            }
+            std::cout << "info depth 1 seldepth 1 ";
+            print_score(std::cout, root_tb_res.score);
             std::cout << "nodes 1 nps 1000 tbhits 1 time 0 pv ";
             printMove(root_tb_res.move);
             std::cout << "\n" << std::flush;
         }
 
         TT::save(root_tb_res.score, ValueNone, root_tb_res.move, 128, hash_type_exact, true);
+
+        if (Limits.ponder.load(std::memory_order_relaxed)) {
+            while (Limits.ponder.load(std::memory_order_relaxed) && !Limits.stopped.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
 
         std::cout << "bestmove ";
         printMove(root_tb_res.move);
@@ -1539,18 +1549,11 @@ void MainThread::search() {
 
         if (root_multipv > 1) {
             for (int pvi = 0; pvi < root_multipv; ++pvi) {
-                const int pvi_score = root_pv_lines[pvi].score;
                 std::cout << "info depth " << curr_depth
                           << " seldepth " << root_pv_lines[pvi].selective_depth
                           << " multipv " << (pvi + 1)
-                          << " score ";
-                if (pvi_score > -MateValue && pvi_score < -MateScore) {
-                    std::cout << "mate " << -(pvi_score + MateValue) / 2 - 1 << " ";
-                } else if (pvi_score > MateScore && pvi_score < MateValue) {
-                    std::cout << "mate " << (MateValue - pvi_score) / 2 + 1 << " ";
-                } else {
-                    std::cout << "cp " << pvi_score << " ";
-                }
+                          << " ";
+                print_score(std::cout, root_pv_lines[pvi].score);
                 std::cout << "nodes " << total_nodes
                           << " nps " << nps
                           << " time " << elapsed_ms
@@ -1564,35 +1567,15 @@ void MainThread::search() {
             }
             std::cout << std::flush;
         } else {
-            if (score > -MateValue && score < -MateScore) {
-                std::cout << "info score mate " << -(score + MateValue) / 2 - 1
-                          << " depth " << curr_depth
-                          << " seldepth " << seldepth
-                          << " nodes " << total_nodes
-                          << " nps " << nps
-                          << " time " << elapsed_ms
-                          << " hashfull " << TT::hashfull()
-                          << " pv ";
-            } else if (score > MateScore && score < MateValue) {
-                std::cout << "info score mate " << (MateValue - score) / 2 + 1
-                          << " depth " << curr_depth
-                          << " seldepth " << seldepth
-                          << " nodes " << total_nodes
-                          << " nps " << nps
-                          << " time " << elapsed_ms
-                          << " hashfull " << TT::hashfull()
-                          << " pv ";
-            } else {
-                std::cout << "info score cp " << score
-                          << " depth " << curr_depth
-                          << " seldepth " << seldepth
-                          << " nodes " << total_nodes
-                          << " nps " << nps
-                          << " time " << elapsed_ms
-                          << " hashfull " << TT::hashfull()
-                          << " pv ";
-            }
-
+            std::cout << "info depth " << curr_depth
+                      << " seldepth " << seldepth
+                      << " ";
+            print_score(std::cout, score);
+            std::cout << "nodes " << total_nodes
+                      << " nps " << nps
+                      << " time " << elapsed_ms
+                      << " hashfull " << TT::hashfull()
+                      << " pv ";
             for (int count = 0; count < pv_length[0]; ++count) {
                 printMove(pv_table[0][count]);
                 std::cout << " ";
@@ -1601,7 +1584,7 @@ void MainThread::search() {
         }
 
         // Soft time management scaling based on best-move stability and score drop
-        if (Limits.timeset && curr_depth >= 5) {
+        if (Limits.timeset && curr_depth >= 5 && !Limits.ponder.load(std::memory_order_relaxed)) {
             if (best_root_move == prev_best_move) {
                 best_move_stability = std::min(10, best_move_stability + 1);
             } else {
@@ -1630,6 +1613,12 @@ void MainThread::search() {
         prev_score = score;
     }
 
+    if (Limits.ponder.load(std::memory_order_relaxed)) {
+        while (Limits.ponder.load(std::memory_order_relaxed) && !Limits.stopped.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
     Limits.stopped.store(true, std::memory_order_relaxed);
 
     for (Thread* th : Threads.threads) {
@@ -1637,11 +1626,25 @@ void MainThread::search() {
             th->wait_for_search_finished();
     }
 
+    int best_move = best_root_move ? best_root_move : pv_table[0][0];
+    if (!best_move && rootMoves.count > 0)
+        best_move = rootMoves.moves[0];
+
+    int ponder_move = 0;
+    if (root_multipv > 1 || root_pv_lines[0].line_length > 0) {
+        if (root_pv_lines[0].line_length > 1 && root_pv_lines[0].line[0] == best_move)
+            ponder_move = root_pv_lines[0].line[1];
+    }
+    if (!ponder_move && pv_length[0] > 1 && pv_table[0][0] == best_move) {
+        ponder_move = pv_table[0][1];
+    }
+
     std::cout << "bestmove ";
-    if (best_root_move)
-        printMove(best_root_move);
-    else
-        printMove(pv_table[0][0]);
+    printMove(best_move);
+    if (ponder_move) {
+        std::cout << " ponder ";
+        printMove(ponder_move);
+    }
     std::cout << "\n" << std::flush;
 }
 

@@ -21,3 +21,7 @@ dist/
 # Match & tournament logs
 *.pgn
 tournament_state.json
+
+# Syzygy tablebases
+syzygy/
+
