@@ -398,7 +398,7 @@ int scoreMove(int move, int tt_move) noexcept {
         }
 
         if (see_ge(move, -cap_hist / 32)) {
-            return 1000000 + mvv_lva;
+            return 1000000 + mvv_lva + (givesCheck(move) ? 10000 : 0);
         } else {
             return -500000 + mvv_lva;
         }
@@ -408,6 +408,9 @@ int scoreMove(int move, int tt_move) noexcept {
         return 900000;
     if (move == killers[1][ply])
         return 850000;
+
+    if (givesCheck(move))
+        return 820000;
 
     if (ply >= 1 && current_move[ply - 1]) {
         const int prev = current_move[ply - 1];
@@ -421,6 +424,20 @@ int scoreMove(int move, int tt_move) noexcept {
 
     if (pieceType(piece) == P && ((sideToMove == White && toSq <= 31) || (sideToMove == Black && toSq >= 32)))
         h += 25000;
+
+    const int oppKingSq = ls1b(sideToMove == White ? bitboards[k] : bitboards[K]);
+    if (oppKingSq >= 0 && oppKingSq < 64) {
+        const Bitboard kZone = KingAttacks[oppKingSq];
+        if ((1ULL << toSq) & kZone) {
+            h += 30000;
+        } else if (pieceType(piece) == N && (KnightAttacks[toSq] & kZone)) {
+            h += 25000;
+            if (KnightAttacks[toSq] & kZone & occupancies[sideToMove ^ 1])
+                h += 25000;
+        } else if (pieceType(piece) == P && (PawnAttacks[sideToMove][toSq] & kZone)) {
+            h += 20000;
+        }
+    }
 
     if (ply >= 1 && current_move[ply - 1]) {
         const int prev1 = current_move[ply - 1];
@@ -555,11 +572,12 @@ int qsearch(int alpha, int beta) {
                 const int prev1 = current_move[ply - 1];
                 cap_hist += capture_cont_history[getMovePiece(prev1)][getMoveTarget(prev1)][piece][toSq];
             }
-            move_scores[i] = 1000000 + victim * 16 - pieceType(piece) + cap_hist / 16;
+            move_scores[i] = 1000000 + victim * 16 - pieceType(piece) + cap_hist / 16 + (givesCheck(m) ? 10000 : 0);
         } else {
             const int pkey = static_cast<int>((pawn_key ^ (pawn_key >> 32)) & PawnHistMask);
             move_scores[i] = history[sideToMove][getMoveSource(m)][getMoveTarget(m)]
-                           + pawn_history[pkey][getMovePiece(m)][getMoveTarget(m)];
+                           + pawn_history[pkey][getMovePiece(m)][getMoveTarget(m)]
+                           + (givesCheck(m) ? 800000 : 0);
         }
     }
 
@@ -796,14 +814,14 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
         }
 
         // Razoring
-        if (!pv_node && !excludedMove && depth <= 3 && eval + 240 * depth <= alpha) {
+        if (!pv_node && !excludedMove && !current_thread->seek_mate && depth <= 3 && eval + 240 * depth <= alpha) {
             const int rscore = qsearch(alpha, alpha + 1);
             if (rscore <= alpha)
                 return rscore;
         }
 
         // Reverse Futility Pruning (Static Null Move Pruning)
-        if (!pv_node && !excludedMove && depth <= 8 && std::abs(beta) < MateScore) {
+        if (!pv_node && !excludedMove && depth <= (current_thread->seek_mate ? 4 : 8) && std::abs(beta) < MateScore) {
             const int rfp_margin = 70 * depth - 22 * (improving + tt_pv);
             if (eval - rfp_margin >= beta)
                 return (eval + beta) / 2;
@@ -861,7 +879,7 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
         }
 
         // ProbCut
-        if (!pv_node && !excludedMove && depth >= 5 && std::abs(beta) < MateScore) {
+        if (!pv_node && !excludedMove && !current_thread->seek_mate && depth >= 5 && std::abs(beta) < MateScore) {
             const int probBeta = beta + 190;
             if (!(tt_res.hit && tt_res.depth >= depth - 3 && tt_res.score < probBeta)) {
                 MoveList_t pcMoves;
@@ -1101,7 +1119,12 @@ moves_loop:
                     R = LMRTable[std::min(depth, MaxSearchDepth - 1)][std::min(moves_searched, 63)] / 2;
                     if (!tt_pv) R += 1;
                 }
-                if (gives_check) R = std::max(0, R - 1);
+                if (gives_check) {
+                    R = std::min(R, 1);
+                }
+                if (current_thread->seek_mate && R > 0) {
+                    R = gives_check ? 0 : (R + 1);
+                }
             }
 
             const int reduced_depth = std::clamp(new_depth - R, 1, new_depth);
@@ -1233,6 +1256,7 @@ void Thread::search() {
     current_thread->reset_search_state();
 
     for (int curr_depth = 1 + int(idx % 2); curr_depth <= Limits.depth; ++curr_depth) {
+        current_thread->seek_mate = Threads.main()->state.seek_mate;
         followPV = true;
         negamax(-Infinity, Infinity, curr_depth, false);
         if (Limits.stopped.load(std::memory_order_relaxed))
@@ -1501,6 +1525,9 @@ void MainThread::search() {
     multi_pv_count = 0;
 
     for (int curr_depth = 1; curr_depth <= Limits.depth; ++curr_depth) {
+        current_thread->seek_mate = (curr_depth >= 4 &&
+            std::abs(score) >= 750 + 220000 / (curr_depth * curr_depth) &&
+            std::abs(score) < MateScore);
         const int prev_best_move = best_root_move;
         bool iteration_aborted = false;
         root_move_stats_count = 0;
@@ -1657,7 +1684,7 @@ void MainThread::search() {
         }
 
         // Soft time management scaling based on best-move stability, score drop, and root node distribution
-        if (Limits.timeset && curr_depth >= 5 && !Limits.ponder.load(std::memory_order_relaxed)) {
+        if (Limits.time != -1 && curr_depth >= 5 && !Limits.ponder.load(std::memory_order_relaxed)) {
             if (best_root_move == prev_best_move) {
                 best_move_stability = std::min(10, best_move_stability + 1);
             } else {

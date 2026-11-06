@@ -94,6 +94,7 @@ struct ThreadState {
     bool scorePV;
     bool allowNull;
     int nmp_min_ply;
+    bool seek_mate;
 
     /// Zeroes every learned heuristic table (used on `ucinewgame`).
     void clear_histories() noexcept {
@@ -122,6 +123,7 @@ struct ThreadState {
         scorePV = false;
         allowNull = true;
         nmp_min_ply = 0;
+        seek_mate = false;
         // Age main butterfly history slightly between moves while preserving learned patterns
         for (int s = 0; s < 2; ++s)
             for (int f = 0; f < 64; ++f)
