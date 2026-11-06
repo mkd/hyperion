@@ -134,6 +134,45 @@ inline void addMove(MoveList_t &moveList, int move) noexcept {
     return false;
 }
 
+/// @return true when `move` by `sideToMove` delivers check to the opponent king.
+[[nodiscard]] inline bool givesCheck(int move) noexcept {
+    const int oppKingSq = ls1b(sideToMove == White ? bitboards[k] : bitboards[K]);
+    if (oppKingSq < 0 || oppKingSq >= 64) return false;
+
+    const int fromSq = getMoveSource(move);
+    const int toSq   = getMoveTarget(move);
+    const int promo  = getPromo(move);
+    const int pt     = promo ? pieceType(promo) : pieceType(getMovePiece(move));
+
+    // Fast check: direct attacks from destination
+    if (pt == N && (KnightAttacks[toSq] & (1ULL << oppKingSq))) return true;
+    if (pt == P && (PawnAttacks[sideToMove][toSq] & (1ULL << oppKingSq))) return true;
+
+    // Occupancy after piece moves from fromSq to toSq
+    Bitboard occ = (occupancies[Both] ^ (1ULL << fromSq)) | (1ULL << toSq);
+    if (getEp(move)) {
+        const int capSq = (sideToMove == White) ? (toSq + 8) : (toSq - 8);
+        occ ^= (1ULL << capSq);
+    }
+
+    // Direct slider checks
+    if ((pt == B || pt == Q) && (getBishopAttacks(toSq, occ) & (1ULL << oppKingSq))) return true;
+    if ((pt == R || pt == Q) && (getRookAttacks(toSq, occ) & (1ULL << oppKingSq)))   return true;
+
+    // Castling check: rook moves to f1/d1 or f8/d8
+    if (getCastle(move)) {
+        const int rTo = (toSq == 62) ? 61 : (toSq == 58) ? 59 : (toSq == 6) ? 5 : 3;
+        return (getRookAttacks(rTo, occ) & (1ULL << oppKingSq)) != 0;
+    }
+
+    // Discovered check: unblocking a friendly slider toward the opponent king
+    const int off = (sideToMove == White) ? 0 : 6;
+    if (getBishopAttacks(oppKingSq, occ) & (bitboards[B + off] | bitboards[Q + off]) & ~(1ULL << fromSq)) return true;
+    if (getRookAttacks(oppKingSq, occ) & (bitboards[R + off] | bitboards[Q + off]) & ~(1ULL << fromSq))   return true;
+
+    return false;
+}
+
 /**
  * Copy of every reversible part of the board, used to undo a move by
  * restoring the saved state rather than by "unmaking" it.

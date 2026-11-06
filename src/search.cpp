@@ -419,6 +419,9 @@ int scoreMove(int move, int tt_move) noexcept {
     const int pkey = static_cast<int>((pawn_key ^ (pawn_key >> 32)) & PawnHistMask);
     h += pawn_history[pkey][piece][toSq];
 
+    if (pieceType(piece) == P && ((sideToMove == White && toSq <= 31) || (sideToMove == Black && toSq >= 32)))
+        h += 25000;
+
     if (ply >= 1 && current_move[ply - 1]) {
         const int prev1 = current_move[ply - 1];
         h += cont_history[0][getMovePiece(prev1)][getMoveTarget(prev1)][piece][toSq];
@@ -683,9 +686,6 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
         ls1b(sideToMove == White ? bitboards[K] : bitboards[k]),
         sideToMove ^ 1
     );
-
-    if (inCheck)
-        depth++;
 
     if (depth <= 0 || ply >= MaxPly - 4 || repetition_index >= 1020)
         return qsearch(alpha, beta);
@@ -996,36 +996,44 @@ moves_loop:
             }
         }
 
+        const bool gives_check = givesCheck(move);
+
         // Pre-move pruning (before makeMove and NNUE update!)
         if (ply > 0 && !pv_node && !inCheck && moves_searched > 0 && best_score > -MateScore) {
             if (is_quiet) {
-                // Late Move Pruning (LMP)
-                const int lmp_limit = (3 + depth * depth) / (2 - improving);
-                if (depth <= 8 && moves_searched >= lmp_limit)
-                    continue;
+                if (!gives_check) {
+                    // Late Move Pruning (LMP)
+                    const int lmp_limit = (3 + depth * depth) / (2 - improving);
+                    if (depth <= 8 && moves_searched >= lmp_limit)
+                        continue;
 
-                // Futility Pruning
-                const int lmr_depth = std::max(0, depth - LMRTable[std::min(depth, MaxSearchDepth - 1)][std::min(moves_searched, 63)]);
-                if (lmr_depth <= 8 && eval + 110 + 95 * lmr_depth + move_hist / 64 <= alpha)
-                    continue;
+                    // Futility Pruning
+                    const int lmr_depth = std::max(0, depth - LMRTable[std::min(depth, MaxSearchDepth - 1)][std::min(moves_searched, 63)]);
+                    if (lmr_depth <= 8 && eval + 110 + 95 * lmr_depth + move_hist / 64 <= alpha)
+                        continue;
 
-                // Quiet History Pruning
-                if (depth <= 4 && move_hist < -3500 * depth)
-                    continue;
+                    // Quiet History Pruning
+                    if (depth <= 4 && move_hist < -3500 * depth)
+                        continue;
 
-                // Quiet SEE Pruning
-                if (depth <= 8 && !see_ge(move, -60 * depth))
-                    continue;
+                    // Quiet SEE Pruning
+                    if (depth <= 8 && !see_ge(move, -60 * depth))
+                        continue;
+                }
             } else {
                 // Capture SEE Pruning
-                if (depth <= 6 && move_scores[count] < 1000000 && !see_ge(move, -25 * depth * depth))
+                if (!gives_check && depth <= 6 && move_scores[count] < 1000000 && !see_ge(move, -25 * depth * depth))
                     continue;
             }
         }
 
-        // Singular Extensions
+        // Extensions
         int extension = 0;
-        if (ply > 0 && depth >= 7 && move == bestmove && !excludedMove &&
+        if (inCheck && double_extensions[ply] < 6) {
+            extension = 1;
+            if (ply + 1 < MaxPly)
+                double_extensions[ply + 1] = double_extensions[ply] + 1;
+        } else if (ply > 0 && depth >= 7 && move == bestmove && !excludedMove &&
             tt_res.hit && tt_res.depth >= depth - 3 &&
             (tt_res.bound == hash_type_beta || tt_res.bound == hash_type_exact) &&
             std::abs(tt_res.score) < MateScore) {
@@ -1080,18 +1088,20 @@ moves_loop:
             score = -negamax(-beta, -alpha, new_depth, ! (pv_node || !cut_node));
         } else {
             int R = 0;
-            if (depth >= 3 && moves_searched >= 1 + 2 * pv_node) {
+            if (ply > 0 && depth >= 3 && moves_searched >= 1 + 2 * pv_node) {
                 if (is_quiet) {
                     R = LMRTable[std::min(depth, MaxSearchDepth - 1)][std::min(moves_searched, 63)];
                     R += !tt_pv;
                     R += !improving;
                     if (cut_node) R += 1;
                     if (move == killers[0][ply - 1] || move == killers[1][ply - 1]) R -= 1;
+                    if (pieceType(piece) == P) R -= 1;
                     R -= std::clamp(move_hist / 6144, -2, 2);
                 } else {
                     R = LMRTable[std::min(depth, MaxSearchDepth - 1)][std::min(moves_searched, 63)] / 2;
                     if (!tt_pv) R += 1;
                 }
+                if (gives_check) R = std::max(0, R - 1);
             }
 
             const int reduced_depth = std::clamp(new_depth - R, 1, new_depth);
