@@ -17,3 +17,7 @@ build/
 dist/
 *.exe
 *.d
+
+# Match & tournament logs
+*.pgn
+tournament_state.json
