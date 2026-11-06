@@ -51,6 +51,8 @@
 inline constexpr int MaxPly = 256;                      ///< Maximum search ply (stack size).
 inline constexpr int CorrHistSize = 16384;              ///< Entries per correction-history table.
 inline constexpr int CorrHistMask = CorrHistSize - 1;   ///< Index mask for correction history.
+inline constexpr int PawnHistSize = 1024;               ///< Entries in pawn-structure quiet history.
+inline constexpr int PawnHistMask = PawnHistSize - 1;   ///< Index mask for pawn-structure history.
 
 /// Everything a search thread owns: its board copy, histories and search stacks.
 struct ThreadState {
@@ -77,7 +79,9 @@ struct ThreadState {
     int killers[2][MaxPly];
     int history[2][64][64];
     int capture_history[12][64][6];
-    int cont_history[12][64][12][64];
+    int cont_history[3][12][64][12][64];             ///< 1-ply (0), 2-ply (1), and 4-ply (2) continuation histories.
+    int capture_cont_history[12][64][12][64];        ///< 1-ply capture continuation history.
+    int pawn_history[PawnHistSize][12][64];          ///< Quiet history indexed by pawn structure key.
     int pawn_corrhist[2][CorrHistSize];
     int nonpawn_corrhist[2][2][CorrHistSize];
     int countermoves[12][64];
@@ -97,6 +101,8 @@ struct ThreadState {
         std::memset(history, 0, sizeof(history));
         std::memset(capture_history, 0, sizeof(capture_history));
         std::memset(cont_history, 0, sizeof(cont_history));
+        std::memset(capture_cont_history, 0, sizeof(capture_cont_history));
+        std::memset(pawn_history, 0, sizeof(pawn_history));
         std::memset(pawn_corrhist, 0, sizeof(pawn_corrhist));
         std::memset(nonpawn_corrhist, 0, sizeof(nonpawn_corrhist));
         std::memset(countermoves, 0, sizeof(countermoves));
@@ -243,6 +249,8 @@ extern thread_local ThreadState* current_thread;         ///< State of the threa
 #define history (current_thread->history)
 #define capture_history (current_thread->capture_history)
 #define cont_history (current_thread->cont_history)
+#define capture_cont_history (current_thread->capture_cont_history)
+#define pawn_history (current_thread->pawn_history)
 #define pawn_corrhist (current_thread->pawn_corrhist)
 #define nonpawn_corrhist (current_thread->nonpawn_corrhist)
 #define countermoves (current_thread->countermoves)

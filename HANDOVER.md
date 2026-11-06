@@ -91,10 +91,16 @@
   - **ProbCut**: Searches good captures (`see_ge(move, probBeta - static_eval)`) with a `qsearch` pre-filter followed by a `depth - 4` search.
   - **Internal Iterative Reductions (IIR)**: Reduces `depth--` on PV and cut nodes (`depth >= 4`) when `!bestmove`.
 - **Move Ordering & Histories**:
-  - Staged selection sort (`pickNextMove`) ordering: `PV Move` -> `TT Move` -> `Good Captures & Promotions (SEE >= -cap_hist/32)` -> `Killer 1` -> `Killer 2` -> `Countermove` -> `Quiet Moves (Butterfly + 1-ply & 2-ply Continuation History)` -> `Bad Captures (SEE < 0)`.
-  - Gravity updates (`bonus` and `-bonus` malus) for Butterfly History (`history[2][64][64]`), 1-ply & 2-ply Continuation History (`cont_history[12][64][12][64]`), and Capture History (`capture_history[12][64][6]`).
+  - Staged selection sort (`pickNextMove`) ordering: `PV Move` -> `TT Move` -> `Good Captures & Promotions (SEE >= -combined_cap_hist/32)` -> `Killer 1` -> `Killer 2` -> `Countermove` -> `Quiet Moves (Butterfly + 1-ply, 2-ply & 4-ply Continuation History + Pawn Structure History)` -> `Bad Captures (SEE < 0)`.
+  - Gravity updates (`bonus` and `-bonus` malus) for:
+    - Butterfly History (`history[2][64][64]`)
+    - Multi-Ply Continuation History (`cont_history[3][12][64][12][64]`, separated 1-ply, 2-ply, and 4-ply)
+    - Capture Continuation History (`capture_cont_history[12][64][12][64]`, 1-ply tactical recapture memory)
+    - Pawn-Structure History (`pawn_history[1024][12][64]`, positional piece placement conditioned on pawn skeleton)
+    - Capture History (`capture_history[12][64][6]`)
   - Pawn & Non-Pawn **Correction History** (`pawn_corrhist[2][16384]`, `nonpawn_corrhist[2][2][16384]`).
-- **Time Management & Threading**:
+- **MultiPV Analysis & Time Management**:
+  - **MultiPV UCI Support**: `setoption name MultiPV value <N>` (1..256), search root top $K$ lines, descending score sort, full UCI formatting (`info multipv <N> ...`), and TT root safety guards.
   - Soft (`opt_stoptime`) and hard (`max_stoptime`) time limits scaled by Best-Move Stability (`0.65x .. 1.45x`) and Eval-Drop (`1.0x .. 1.5x`).
   - 16 MB `pthread` stacks (`pthread_attr_setstacksize`) on macOS/POSIX so deep multi-threaded searches (`seldepth 90+`) never overflow macOS's 512 KB default pthread stack.
 
@@ -102,7 +108,7 @@
 
 ## 4. Benchmarks & Match Verification vs Gargantua 2.1
 
-- **`./hyperion bench 12` (16 positions, 1 thread)**: `897,947` nodes in `550 ms` (**~1.55M – 1.65M NPS** single-threaded).
+- **`./hyperion bench 12` (16 positions, 1 thread)**: `943,998` nodes in `650 ms` (**~1.45M – 1.55M NPS** single-threaded).
 - **Cross-compilation**: Validated builds for Linux x86_64, Linux ARM64, macOS x86_64, macOS ARM64, and Windows x86_64 (`make release`).
 - **8-Thread Tactical Search**: Reaches **25M – 30.3M NPS** and solves `batch_positions.py` Position 1 (`M7`) at depth 32 in `952 ms` (continuing cleanly to depth 48+).
 - **Head-to-Head Matches vs Gargantua 2.1**:
@@ -113,7 +119,6 @@
 
 ## 5. Potential Next Steps for Future Sessions
 
-1. **MultiPV Support**: Add a `MultiPV` UCI option for analysis tools.
-2. **4-Ply Continuation History & Pawn History**: Extend continuation history to `-4` plies and add a pawn-structure-indexed quiet history table (`pawn_history[2][512][12][64]`).
-3. **SPSA Parameter Tuning**: Tune LMR, RFP, Futility, and Correction History weights via OpenBench / cutechess-cli SPRT testing.
-4. **Root Syzygy DTZ Probing**: Add `tb_probe_root` DTZ probing at the root alongside in-tree `tb_probe_wdl`.
+1. **Root Syzygy DTZ Probing**: Add `tb_probe_root` DTZ probing at the root alongside in-tree `tb_probe_wdl` for instantaneous winning endgame play.
+2. **SPSA Parameter Tuning**: Tune LMR, RFP, Futility, History bonuses, and Correction History weights via OpenBench / cutechess-cli SPRT testing.
+3. **Capture Reductions**: Apply selective reductions to losing captures in quiet positions.

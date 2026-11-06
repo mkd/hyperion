@@ -35,14 +35,18 @@
      - **ProbCut**: Generates and searches good captures (`see_ge(move, probBeta - static_eval)`) with a `qsearch` pre-filter followed by a `depth - 4` verification search.
      - **Internal Iterative Reductions (IIR)**: Reduces depth by 1 on PV and cut nodes when no TT move is available (`depth >= 4`).
 
-6. **Staged Move Ordering & Multi-Table History + Correction History (`src/search.cpp`, `src/eval.h`)**:
-   - Orders moves as: `PV/TT Move` -> `Good Captures & Promotions (SEE >= -cap_hist/32)` -> `Killer 1` -> `Killer 2` -> `Countermove` -> `Quiet Moves (Butterfly + 1-ply & 2-ply Continuation History)` -> `Bad Captures (SEE < 0)`.
+6. **Staged Move Ordering, Multi-Table History & Pawn-Structure History (`src/search.cpp`, `src/eval.h`, `src/thread.h`)**:
+   - Orders moves as: `PV/TT Move` -> `Good Captures & Promotions (SEE >= -combined_cap_hist/32)` -> `Killer 1` -> `Killer 2` -> `Countermove` -> `Quiet Moves (Butterfly + 1-ply, 2-ply & 4-ply Continuation History + Pawn Structure History)` -> `Bad Captures (SEE < 0)`.
    - Uses partial selection sort (`pickNextMove`) on demand rather than sorting all moves upfront.
-   - Updates Butterfly History, 1-ply & 2-ply Continuation History, and Capture History with Stockfish gravity (`bonus` for the cutoff move and `-bonus` malus for previously searched moves).
+   - **Multi-Ply Continuation History**: Separated 1-ply (opponent response), 2-ply (self follow-up), and 4-ply tables (`cont_history[3][12][64][12][64]`).
+   - **Capture Continuation History**: 1-ply tactical recapture history (`capture_cont_history[12][64][12][64]`) prioritizing sharp recaptures provoked by the opponent's previous move.
+   - **Pawn-Structure History**: Quiet history indexed by Zobrist pawn hash (`pawn_history[1024][12][64]`), learning positional piece placements for specific pawn structures.
+   - Updates Butterfly History, Continuation Histories, Capture Histories, and Pawn History with Stockfish gravity (`bonus` for cutoff move, `-bonus` malus for previously tried moves).
    - Adjusts raw NNUE static evaluations using Pawn and Non-Pawn **Correction History** (`pawn_corrhist`, `nonpawn_corrhist`).
 
-7. **Soft/Hard Time Management & Non-Blocking UCI Loop (`src/uci.cpp`, `src/search.cpp`)**:
-   - Replaces Gargantua's broken increment time allocation with soft (`opt_stoptime`) and hard (`max_stoptime`) bounds, dynamically scaled by **Best-Move Stability** and **Eval-Drop** heuristics.
+7. **MultiPV Analysis & Soft/Hard Time Management (`src/uci.cpp`, `src/search.cpp`)**:
+   - **MultiPV UCI Analysis Mode**: Full support for `setoption name MultiPV value <N>` (1..256), extracting, ranking, and printing the top $K$ principal variations at root with TT safety guards and descending score ordering.
+   - Soft (`opt_stoptime`) and hard (`max_stoptime`) bounds dynamically scaled by **Best-Move Stability** and **Eval-Drop** heuristics.
    - Runs a clean, non-blocking UCI loop without race conditions on `std::cin`.
 
 ---

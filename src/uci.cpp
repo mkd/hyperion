@@ -346,6 +346,8 @@ void uci() {
             cout << "option name Hash type spin default " << DefaultHashSize
                  << " min " << MinHashSize << " max " << MaxHashSize << "\n";
             cout << "option name Threads type spin default 1 min 1 max 1024\n";
+            cout << "option name MultiPV type spin default " << DefaultMultiPV
+                 << " min " << MinMultiPV << " max " << MaxMultiPV << "\n";
             cout << "option name SyzygyPath type string default <empty>\n";
             cout << "uciok\n" << flush;
         } else if (token == "setoption") {
@@ -365,6 +367,11 @@ void uci() {
                 ss >> val_tok >> num_threads;
                 num_threads = std::clamp<size_t>(num_threads, 1, 1024);
                 Threads.set(num_threads);
+            } else if (opt_name == "MultiPV") {
+                string val_tok;
+                int mpv = DefaultMultiPV;
+                ss >> val_tok >> mpv;
+                MultiPV = std::clamp(mpv, MinMultiPV, MaxMultiPV);
             } else if (opt_name == "SyzygyPath") {
                 string val_tok, path;
                 ss >> val_tok; // "value"

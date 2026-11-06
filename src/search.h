@@ -41,6 +41,12 @@ inline constexpr int TBWinScore     = 28000; ///< Base score of a tablebase win.
 inline constexpr int MaxSearchDepth = 128;   ///< Deepest iteration of iterative deepening.
 inline constexpr int MaxHistory     = 16384; ///< Saturation bound of the history tables.
 
+inline constexpr int DefaultMultiPV = 1;     ///< Default number of PV lines at root.
+inline constexpr int MinMultiPV     = 1;     ///< Minimum MultiPV option value.
+inline constexpr int MaxMultiPV     = 256;   ///< Maximum MultiPV option value.
+
+extern int MultiPV;                          ///< Number of PV lines searched at root.
+
 /// Time and depth limits of the current `go` command (times in milliseconds).
 struct Limits_t {
     uint64_t starttime    = 0;      ///< Wall-clock time the search started.
