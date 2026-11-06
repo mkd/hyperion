@@ -37,6 +37,7 @@
 #include "thread.h"
 #include "tt.h"
 #include <algorithm>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -311,7 +312,21 @@ void bench(int depth) {
 }
 
 /// UCI main loop (isready, position, go, stop, setoption, ... plus debug commands `d`, `eval`, `flip`, `bench`).
+static string SyzygyPath = "<empty>";
+
+static void initSyzygyAutoPath() {
+    std::error_code ec;
+    for (const char* candidate : {"../syzygy", "./syzygy", "syzygy"}) {
+        if (std::filesystem::is_directory(candidate, ec)) {
+            SyzygyPath = candidate;
+            tb_init(SyzygyPath.c_str());
+            break;
+        }
+    }
+}
+
 void uci() {
+    initSyzygyAutoPath();
     string input;
     while (getline(cin, input)) {
         if (input.empty()) continue;
@@ -348,7 +363,7 @@ void uci() {
             cout << "option name Threads type spin default 1 min 1 max 1024\n";
             cout << "option name MultiPV type spin default " << DefaultMultiPV
                  << " min " << MinMultiPV << " max " << MaxMultiPV << "\n";
-            cout << "option name SyzygyPath type string default <empty>\n";
+            cout << "option name SyzygyPath type string default " << SyzygyPath << "\n";
             cout << "uciok\n" << flush;
         } else if (token == "setoption") {
             Threads.wait_for_search_finished();
@@ -377,7 +392,11 @@ void uci() {
                 ss >> val_tok; // "value"
                 getline(ss >> ws, path);
                 if (!path.empty() && path != "<empty>") {
-                    tb_init(path.c_str());
+                    SyzygyPath = path;
+                    tb_init(SyzygyPath.c_str());
+                } else {
+                    SyzygyPath = "<empty>";
+                    tb_init("");
                 }
             }
         } else if (token == "d") {

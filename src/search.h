@@ -83,6 +83,20 @@ int qsearch(int alpha, int beta);
 /// Alpha-beta search of the current thread's position (see search.cpp).
 int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove = 0);
 
+/// Result of probing Syzygy tablebases at the root position.
+struct RootTbResult {
+    int move = 0;   ///< Encoded legal move.
+    int score = 0;  ///< Score in centipawns or mate format.
+    int wdl = 0;    ///< TB_LOSS, TB_BLESSED_LOSS, TB_DRAW, TB_CURSED_WIN, TB_WIN.
+    int dtz = 0;    ///< Distance to zero.
+};
+
+/// Attempts to probe Syzygy tablebases at the root position using DTZ tables.
+/// Populates `best_res` with the optimal move, score, WDL, and DTZ.
+/// If `all_results` is provided, populates and sorts all legal root moves.
+/// @return number of legal moves probed (0 if probe failed or unavailable).
+int root_tb_probe(RootTbResult &best_res, RootTbResult *all_results = nullptr, int max_results = 0);
+
 /// Starts a search on all threads using the current `Limits`.
 void search();
 

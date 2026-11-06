@@ -49,6 +49,13 @@
    - Soft (`opt_stoptime`) and hard (`max_stoptime`) bounds dynamically scaled by **Best-Move Stability** and **Eval-Drop** heuristics.
    - Runs a clean, non-blocking UCI loop without race conditions on `std::cin`.
 
+8. **Syzygy Endgame Tablebases & DTZ Probing (`src/search.cpp`, `src/tbprobe.cpp`, `src/tbconfig.h`, `src/uci.cpp`)**:
+   - **Root Syzygy DTZ Probing**: Uses Distance-to-Zero (`.rtbz`) tablebases at root to find the fastest zeroing move (pawn push, capture, or mate) under the 50-move rule, avoiding 50-move draws in theoretical wins and securing instantaneous (< 1ms) responses.
+   - **MultiPV DTZ Support**: Ranks all legal root moves by DTZ/WDL score and outputs multiple principal variations under `setoption name MultiPV value <N>`.
+   - **50-Move Proximity Awareness**: Distinguishes full wins (`TB_WIN`), cursed wins (`TB_CURSED_WIN`, reported as `cp 1`), blessed losses (`TB_BLESSED_LOSS`, reported as `cp -1`), draws (`TB_DRAW`), and direct mates (`mate 1`).
+   - **Auto-Discovery**: Automatically discovers Syzygy tablebases in `../syzygy`, `./syzygy`, or `syzygy` at engine startup, configurable via `setoption name SyzygyPath value <path>`.
+   - **In-Tree WDL Probing**: Probes Win-Draw-Loss (`.rtbw`) tablebases during alpha-beta search (`ply > 0`) to prune and cut off won/lost/drawn branches.
+
 ---
 
 ## Building & Running

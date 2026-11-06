@@ -44,12 +44,12 @@
 #define PYRRHIC_LSB(x)                   (ls1b(x))
 #define PYRRHIC_POPLSB(x)                (popLsb(x))
 
-#define PYRRHIC_PAWN_ATTACKS(sq, c)      (PawnAttacks[c][sq])
-#define PYRRHIC_KNIGHT_ATTACKS(sq)       (KnightAttacks[sq])
-#define PYRRHIC_BISHOP_ATTACKS(sq, occ)  (getBishopAttacks(sq, occ))
-#define PYRRHIC_ROOK_ATTACKS(sq, occ)    (getRookAttacks(sq, occ))
-#define PYRRHIC_QUEEN_ATTACKS(sq, occ)   (getQueenAttacks(sq, occ))
-#define PYRRHIC_KING_ATTACKS(sq)         (KingAttacks[sq])
+#define PYRRHIC_PAWN_ATTACKS(sq, c)      (__builtin_bswap64(PawnAttacks[(c) ^ 1][(sq) ^ 56]))
+#define PYRRHIC_KNIGHT_ATTACKS(sq)       (__builtin_bswap64(KnightAttacks[(sq) ^ 56]))
+#define PYRRHIC_BISHOP_ATTACKS(sq, occ)  (__builtin_bswap64(getBishopAttacks((sq) ^ 56, __builtin_bswap64(occ))))
+#define PYRRHIC_ROOK_ATTACKS(sq, occ)    (__builtin_bswap64(getRookAttacks((sq) ^ 56, __builtin_bswap64(occ))))
+#define PYRRHIC_QUEEN_ATTACKS(sq, occ)   (__builtin_bswap64(getQueenAttacks((sq) ^ 56, __builtin_bswap64(occ))))
+#define PYRRHIC_KING_ATTACKS(sq)         (__builtin_bswap64(KingAttacks[(sq) ^ 56]))
 
 /*
  * Pyrrhic can produce scores for tablebase moves. These depend on the value

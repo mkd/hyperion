@@ -123,6 +123,7 @@ inline void addMove(MoveList_t &moveList, int move) noexcept {
 
 /// @return true when `square` is attacked by any piece of colour `side`.
 [[nodiscard]] inline bool isSquareAttacked(int square, int side) noexcept {
+    if (square < 0 || square >= 64) return false;
     const int off = (side == White) ? 0 : 6; // piece-code offset of the attacking side
 
     if (PawnAttacks[side ^ 1][square] & bitboards[P + off]) return true;

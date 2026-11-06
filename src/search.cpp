@@ -48,6 +48,22 @@
 Limits_t Limits;
 
 int MultiPV = DefaultMultiPV;
+
+namespace {
+
+inline uint64_t to_fathom_bb(uint64_t bb) noexcept {
+    return __builtin_bswap64(bb);
+}
+
+inline unsigned to_fathom_sq(int sq) noexcept {
+    return (sq == NoSq) ? 0 : static_cast<unsigned>(sq ^ 56);
+}
+
+inline int from_fathom_sq(int sq) noexcept {
+    return sq ^ 56;
+}
+
+} // namespace
 static int multi_pv_moves[256];
 static int multi_pv_count = 0;
 
@@ -653,14 +669,16 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
         countBits(occupancies[Both]) <= static_cast<int>(TB_LARGEST) &&
         fifty == 0 && !castle) {
         const unsigned res = tb_probe_wdl(
-            occupancies[White], occupancies[Black],
-            bitboards[K] | bitboards[k],
-            bitboards[Q] | bitboards[q],
-            bitboards[R] | bitboards[r],
-            bitboards[B] | bitboards[b],
-            bitboards[N] | bitboards[n],
-            bitboards[P] | bitboards[p],
-            epsq == NoSq ? 0 : epsq, sideToMove == White
+            to_fathom_bb(occupancies[White]),
+            to_fathom_bb(occupancies[Black]),
+            to_fathom_bb(bitboards[K] | bitboards[k]),
+            to_fathom_bb(bitboards[Q] | bitboards[q]),
+            to_fathom_bb(bitboards[R] | bitboards[r]),
+            to_fathom_bb(bitboards[B] | bitboards[b]),
+            to_fathom_bb(bitboards[N] | bitboards[n]),
+            to_fathom_bb(bitboards[P] | bitboards[p]),
+            to_fathom_sq(epsq),
+            sideToMove == White
         );
         if (res != TB_RESULT_FAILED) {
             nodes++;
@@ -1149,6 +1167,159 @@ void Thread::search() {
     }
 }
 
+/// Probes Syzygy tablebases at the root position using DTZ tables.
+int root_tb_probe(RootTbResult &best_res, RootTbResult *all_results, int max_results) {
+    if (TB_LARGEST == 0 || countBits(occupancies[Both]) > static_cast<int>(TB_LARGEST) || castle != 0)
+        return 0;
+
+    unsigned tb_moves[TB_MAX_MOVES];
+    const unsigned res = tb_probe_root(
+        to_fathom_bb(occupancies[White]),
+        to_fathom_bb(occupancies[Black]),
+        to_fathom_bb(bitboards[K] | bitboards[k]),
+        to_fathom_bb(bitboards[Q] | bitboards[q]),
+        to_fathom_bb(bitboards[R] | bitboards[r]),
+        to_fathom_bb(bitboards[B] | bitboards[b]),
+        to_fathom_bb(bitboards[N] | bitboards[n]),
+        to_fathom_bb(bitboards[P] | bitboards[p]),
+        fifty,
+        to_fathom_sq(epsq),
+        sideToMove == White,
+        (all_results && max_results > 0) ? tb_moves : nullptr
+    );
+
+    if (res == TB_RESULT_FAILED || res == TB_RESULT_CHECKMATE || res == TB_RESULT_STALEMATE)
+        return 0;
+
+    const int best_from = from_fathom_sq(TB_GET_FROM(res));
+    const int best_to   = from_fathom_sq(TB_GET_TO(res));
+    const int best_prom = TB_GET_PROMOTES(res);
+    const int best_wdl  = TB_GET_WDL(res);
+    const int best_dtz  = TB_GET_DTZ(res);
+
+    MoveList_t rootMoves;
+    rootMoves.count = 0;
+    generateMoves(rootMoves);
+
+    auto match_tb_move = [&](int from, int to, int prom) -> int {
+        for (int i = 0; i < rootMoves.count; ++i) {
+            const int m = rootMoves.moves[i];
+            if (getMoveSource(m) == from && getMoveTarget(m) == to) {
+                const int p = getPromo(m);
+                if (prom == 0 && p == 0) return m;
+                if (prom == 1 && (p == Q || p == q)) return m;
+                if (prom == 2 && (p == R || p == r)) return m;
+                if (prom == 3 && (p == B || p == b)) return m;
+                if (prom == 4 && (p == N || p == n)) return m;
+            }
+        }
+        return 0;
+    };
+
+    auto is_direct_checkmate = [&](int move) -> bool {
+        const BoardSnapshot snapshot;
+        if (!makeMove(move)) {
+            snapshot.restore();
+            return false;
+        }
+        const int oppKingSq = ls1b(sideToMove == White ? bitboards[K] : bitboards[k]);
+        if (!isSquareAttacked(oppKingSq, sideToMove ^ 1)) {
+            snapshot.restore();
+            return false;
+        }
+        MoveList_t oppMoves;
+        oppMoves.count = 0;
+        generateMoves(oppMoves);
+        bool has_legal = false;
+        for (int j = 0; j < oppMoves.count; ++j) {
+            const BoardSnapshot snap2;
+            if (makeMove(oppMoves.moves[j])) {
+                has_legal = true;
+                snap2.restore();
+                break;
+            }
+            snap2.restore();
+        }
+        snapshot.restore();
+        return !has_legal;
+    };
+
+    auto calc_tb_score = [&](int move, int wdl, int dtz) -> int {
+        if (wdl == TB_WIN) {
+            if (dtz == 1 && is_direct_checkmate(move))
+                return MateValue - 1;
+            return TBWinScore - dtz;
+        }
+        if (wdl == TB_LOSS)
+            return -TBWinScore + dtz;
+        if (wdl == TB_CURSED_WIN)
+            return 1;
+        if (wdl == TB_BLESSED_LOSS)
+            return -1;
+        return 0;
+    };
+
+    const int best_move = match_tb_move(best_from, best_to, best_prom);
+    if (!best_move)
+        return 0;
+
+    // Verify legality
+    {
+        const BoardSnapshot snapshot;
+        if (!makeMove(best_move)) {
+            snapshot.restore();
+            return 0;
+        }
+        snapshot.restore();
+    }
+
+    best_res.move  = best_move;
+    best_res.wdl   = best_wdl;
+    best_res.dtz   = best_dtz;
+    best_res.score = calc_tb_score(best_move, best_wdl, best_dtz);
+
+    if (all_results && max_results > 0) {
+        int count = 0;
+        for (int i = 0; tb_moves[i] != TB_RESULT_FAILED && count < max_results; ++i) {
+            const int m_from = from_fathom_sq(TB_GET_FROM(tb_moves[i]));
+            const int m_to   = from_fathom_sq(TB_GET_TO(tb_moves[i]));
+            const int m_prom = TB_GET_PROMOTES(tb_moves[i]);
+            const int m_wdl  = TB_GET_WDL(tb_moves[i]);
+            const int m_dtz  = TB_GET_DTZ(tb_moves[i]);
+
+            const int m = match_tb_move(m_from, m_to, m_prom);
+            if (!m)
+                continue;
+
+            const BoardSnapshot snapshot;
+            if (!makeMove(m)) {
+                snapshot.restore();
+                continue;
+            }
+            snapshot.restore();
+
+            all_results[count].move  = m;
+            all_results[count].wdl   = m_wdl;
+            all_results[count].dtz   = m_dtz;
+            all_results[count].score = calc_tb_score(m, m_wdl, m_dtz);
+            count++;
+        }
+
+        if (count == 0) {
+            all_results[0] = best_res;
+            count = 1;
+        } else {
+            std::stable_sort(all_results, all_results + count, [](const RootTbResult &a, const RootTbResult &b) {
+                return a.score > b.score;
+            });
+        }
+
+        return count;
+    }
+
+    return 1;
+}
+
 /**
  * Main-thread iterative deepening: aspiration windows around the previous
  * score, MultiPV line extraction and formatting, `info` output after each
@@ -1185,6 +1356,60 @@ void MainThread::search() {
     }
 
     const int root_multipv = std::clamp(MultiPV, 1, legal_root_moves);
+
+    // Syzygy Endgame Tablebase Root Probe (DTZ)
+    RootTbResult root_tb_res;
+    RootTbResult all_tb_results[256];
+    const int tb_count = root_tb_probe(root_tb_res, all_tb_results, 256);
+
+    if (tb_count > 0) {
+        Limits.stopped.store(true, std::memory_order_relaxed);
+
+        for (Thread* th : Threads.threads) {
+            if (th != this)
+                th->wait_for_search_finished();
+        }
+
+        const int num_to_report = std::min(root_multipv, tb_count);
+        if (num_to_report > 1) {
+            for (int pvi = 0; pvi < num_to_report; ++pvi) {
+                const int pvi_score = all_tb_results[pvi].score;
+                std::cout << "info depth 1 seldepth 1 multipv " << (pvi + 1)
+                          << " score ";
+                if (pvi_score > -MateValue && pvi_score < -MateScore) {
+                    std::cout << "mate " << -(pvi_score + MateValue) / 2 - 1 << " ";
+                } else if (pvi_score > MateScore && pvi_score < MateValue) {
+                    std::cout << "mate " << (MateValue - pvi_score) / 2 + 1 << " ";
+                } else {
+                    std::cout << "cp " << pvi_score << " ";
+                }
+                std::cout << "nodes 1 nps 1000 tbhits 1 time 0 pv ";
+                printMove(all_tb_results[pvi].move);
+                std::cout << "\n";
+            }
+            std::cout << std::flush;
+        } else {
+            const int pvi_score = root_tb_res.score;
+            std::cout << "info depth 1 seldepth 1 score ";
+            if (pvi_score > -MateValue && pvi_score < -MateScore) {
+                std::cout << "mate " << -(pvi_score + MateValue) / 2 - 1 << " ";
+            } else if (pvi_score > MateScore && pvi_score < MateValue) {
+                std::cout << "mate " << (MateValue - pvi_score) / 2 + 1 << " ";
+            } else {
+                std::cout << "cp " << pvi_score << " ";
+            }
+            std::cout << "nodes 1 nps 1000 tbhits 1 time 0 pv ";
+            printMove(root_tb_res.move);
+            std::cout << "\n" << std::flush;
+        }
+
+        TT::save(root_tb_res.score, ValueNone, root_tb_res.move, 128, hash_type_exact, true);
+
+        std::cout << "bestmove ";
+        printMove(root_tb_res.move);
+        std::cout << "\n" << std::flush;
+        return;
+    }
 
     struct RootPVInfo {
         int move = 0;
