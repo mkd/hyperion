@@ -45,6 +45,7 @@
 using std::cin, std::cout, std::flush, std::getline, std::istringstream, std::string, std::to_string, std::vector, std::ws;
 
 uint64_t perft_nodes = 0;
+bool UCI_ShowWDL = false;
 
 /// Recursive perft: counts leaf nodes, verifying legality with makeMove().
 void perft_driver(int depth) {
@@ -378,6 +379,7 @@ void uci() {
             cout << "option name MultiPV type spin default " << DefaultMultiPV
                  << " min " << MinMultiPV << " max " << MaxMultiPV << "\n";
             cout << "option name Ponder type check default false\n";
+            cout << "option name UCI_ShowWDL type check default false\n";
             cout << "option name SyzygyPath type string default " << SyzygyPath << "\n";
             cout << "uciok\n" << flush;
         } else if (token == "setoption") {
@@ -405,6 +407,10 @@ void uci() {
             } else if (opt_name == "Ponder") {
                 string val_tok, val;
                 ss >> val_tok >> val;
+            } else if (opt_name == "UCI_ShowWDL") {
+                string val_tok, val;
+                ss >> val_tok >> val;
+                UCI_ShowWDL = (val == "true");
             } else if (opt_name == "SyzygyPath") {
                 string val_tok, path;
                 ss >> val_tok; // "value"

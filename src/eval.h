@@ -47,14 +47,20 @@ void initEval(const char* argv0 = nullptr);
 /// @return the raw NNUE evaluation (centipawns, side-to-move relative).
 int evaluate() noexcept;
 
-/// @return `raw_eval` corrected by the pawn and non-pawn correction histories (clamped to +/-29000).
+/// @return `raw_eval` corrected by correction histories and damped by 50-move rule (clamped to +/-29000).
 [[nodiscard]] inline int adjustEvalWithCorrHist(int raw_eval) noexcept {
     const int stm = sideToMove;
     const int pawn_corr = pawn_corrhist[stm][pawn_key & CorrHistMask];
     const int w_np_corr = nonpawn_corrhist[stm][White][non_pawn_key[White] & CorrHistMask];
     const int b_np_corr = nonpawn_corrhist[stm][Black][non_pawn_key[Black] & CorrHistMask];
     const int total_corr = (pawn_corr + (w_np_corr + b_np_corr) / 2) / CorrHistGrain;
-    return std::clamp(raw_eval + total_corr, -29000, 29000);
+    int eval = std::clamp(raw_eval + total_corr, -29000, 29000);
+    if (fifty >= 60) {
+        if (fifty >= 100)
+            return 0;
+        eval = (eval * (100 - fifty)) / 40;
+    }
+    return eval;
 }
 
 /// Exponential-moving-average update of one table entry with the given `weight` (out of 256).

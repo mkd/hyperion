@@ -42,6 +42,7 @@ inline constexpr uint32_t MinHashSize     = 1;     ///< Smallest allowed `Hash` 
 inline constexpr uint32_t MaxHashSize     = 65536; ///< Largest allowed `Hash` (MiB).
 
 extern uint64_t perft_nodes; ///< Leaf counter of the running perft.
+extern bool UCI_ShowWDL;      ///< Whether to include WDL (win/draw/loss) probabilities in UCI `info` output.
 
 /// Counts the leaf nodes of the legal move tree below the current position.
 void perft_driver(int depth);

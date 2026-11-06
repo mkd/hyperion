@@ -104,11 +104,20 @@
   - Soft (`opt_stoptime`) and hard (`max_stoptime`) time limits scaled by Best-Move Stability (`0.65x .. 1.45x`) and Eval-Drop (`1.0x .. 1.5x`).
   - 16 MB `pthread` stacks (`pthread_attr_setstacksize`) on macOS/POSIX so deep multi-threaded searches (`seldepth 90+`) never overflow macOS's 512 KB default pthread stack.
 
+- **Endgame Tablebases, 50-Move Draw Curve & Win-Rate Model**:
+  - **Syzygy DTZ Root Probing**: Full DTZ tablebase probing at root (`tb_probe_root`), auto-discovering tablebases and outputting optimal winning moves with mate distance formatting (`score mate <moves>`).
+  - **50-Move Rule Damping**: Leaf static evaluation compressed non-linearly towards 0 when `fifty >= 60` (`(100 - fifty) / 40`), eliminating horizon blindness in grinding endgames.
+  - **UCI WDL Model (`UCI_ShowWDL`)**: Support for `setoption name UCI_ShowWDL value true`, reporting exact Win/Draw/Loss distribution in permille (`wdl <w> <d> <l>`).
+  - **UCI Ponder & Hashfull %**: Full `go ponder`, `ponderhit`, `bestmove ... ponder ...`, and generation-free `hashfull()` tracking.
+- **Node-Distribution Dynamic Time Management**:
+  - Soft time limit dynamically scaled by root move node fraction $F = \text{best\_move\_nodes} / \text{total\_nodes}$ ($0.60\times$ on dominating moves, up to $1.40\times$ on close battles).
+  - Single legal root move fast exit (1ms) under clock constraints.
+
 ---
 
 ## 4. Benchmarks & Match Verification vs Gargantua 2.1
 
-- **`./hyperion bench 12` (16 positions, 1 thread)**: `943,998` nodes in `650 ms` (**~1.45M – 1.55M NPS** single-threaded).
+- **`./hyperion bench 12` (16 positions, 1 thread)**: `943,998` nodes in `604–668 ms` (**~1.45M – 1.60M NPS** single-threaded).
 - **Cross-compilation**: Validated builds for Linux x86_64, Linux ARM64, macOS x86_64, macOS ARM64, and Windows x86_64 (`make release`).
 - **8-Thread Tactical Search**: Reaches **25M – 30.3M NPS** and solves `batch_positions.py` Position 1 (`M7`) at depth 32 in `952 ms` (continuing cleanly to depth 48+).
 - **Head-to-Head Matches vs Gargantua 2.1**:
@@ -119,6 +128,6 @@
 
 ## 5. Potential Next Steps for Future Sessions
 
-1. **Root Syzygy DTZ Probing**: Add `tb_probe_root` DTZ probing at the root alongside in-tree `tb_probe_wdl` for instantaneous winning endgame play.
-2. **SPSA Parameter Tuning**: Tune LMR, RFP, Futility, History bonuses, and Correction History weights via OpenBench / cutechess-cli SPRT testing.
+1. **SPSA Parameter Tuning**: Tune LMR, RFP, Futility, History bonuses, and Correction History weights via OpenBench / cutechess-cli SPRT testing.
+2. **Continuation Correction History (`cont_corrhist`)**: Adjust static evaluation based on the last played move/piece pair.
 3. **Capture Reductions**: Apply selective reductions to losing captures in quiet positions.

@@ -68,6 +68,33 @@ inline void print_score(std::ostream &os, int score) {
     }
 }
 
+inline void print_wdl(std::ostream &os, int score) {
+    int w = 0, d = 0, l = 0;
+    if (score > MateScore || score >= TBWinScore - MaxPly) {
+        w = 1000; d = 0; l = 0;
+    } else if (score < -MateScore || score <= -TBWinScore + MaxPly) {
+        w = 0; d = 0; l = 1000;
+    } else {
+        constexpr double a = 100.0;
+        constexpr double b = 100.0;
+        const double win_prob  = 1.0 / (1.0 + std::exp(-(double(score) - a) / b));
+        const double loss_prob = 1.0 / (1.0 + std::exp( (double(score) + a) / b));
+        w = static_cast<int>(std::round(win_prob * 1000.0));
+        l = static_cast<int>(std::round(loss_prob * 1000.0));
+        w = std::clamp(w, 0, 1000);
+        l = std::clamp(l, 0, 1000 - w);
+        d = 1000 - w - l;
+    }
+    os << "wdl " << w << " " << d << " " << l << " ";
+}
+
+struct RootMoveNodeStats {
+    int move = 0;
+    uint64_t node_count = 0;
+};
+static RootMoveNodeStats root_move_stats[256];
+static int root_move_stats_count = 0;
+
 inline uint64_t to_fathom_bb(uint64_t bb) noexcept {
     return __builtin_bswap64(bb);
 }
@@ -1042,6 +1069,8 @@ moves_loop:
         repetition_index++;
         repetition_table[repetition_index] = hash_key;
 
+        const uint64_t node_start = nodes;
+
         const int new_depth = depth - 1 + extension;
         int score = 0;
 
@@ -1081,6 +1110,21 @@ moves_loop:
         repetition_index--;
         snapshot.restore();
         Nnue::undoMove(move);
+
+        if (ply == 0 && current_thread == &Threads.main()->state) {
+            const uint64_t m_nodes = nodes - node_start;
+            bool found = false;
+            for (int r = 0; r < root_move_stats_count; ++r) {
+                if (root_move_stats[r].move == move) {
+                    root_move_stats[r].node_count += m_nodes;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && root_move_stats_count < 256) {
+                root_move_stats[root_move_stats_count++] = {move, m_nodes};
+            }
+        }
 
         if (Limits.stopped.load(std::memory_order_relaxed))
             return 0;
@@ -1374,6 +1418,18 @@ void MainThread::search() {
         return;
     }
 
+    if (legal_root_moves == 1 && Limits.timeset && !Limits.ponder.load(std::memory_order_relaxed)) {
+        std::cout << "info depth 1 seldepth 1 score cp 0 ";
+        if (UCI_ShowWDL) print_wdl(std::cout, 0);
+        std::cout << "nodes 1 time 1 pv ";
+        printMove(best_root_move);
+        std::cout << "\n";
+        std::cout << "bestmove ";
+        printMove(best_root_move);
+        std::cout << "\n" << std::flush;
+        return;
+    }
+
     const int root_multipv = std::clamp(MultiPV, 1, legal_root_moves);
 
     // Syzygy Endgame Tablebase Root Probe (DTZ)
@@ -1394,6 +1450,7 @@ void MainThread::search() {
             for (int pvi = 0; pvi < num_to_report; ++pvi) {
                 std::cout << "info depth 1 seldepth 1 multipv " << (pvi + 1) << " ";
                 print_score(std::cout, all_tb_results[pvi].score);
+                if (UCI_ShowWDL) print_wdl(std::cout, all_tb_results[pvi].score);
                 std::cout << "nodes 1 nps 1000 tbhits 1 time 0 pv ";
                 printMove(all_tb_results[pvi].move);
                 std::cout << "\n";
@@ -1402,6 +1459,7 @@ void MainThread::search() {
         } else {
             std::cout << "info depth 1 seldepth 1 ";
             print_score(std::cout, root_tb_res.score);
+            if (UCI_ShowWDL) print_wdl(std::cout, root_tb_res.score);
             std::cout << "nodes 1 nps 1000 tbhits 1 time 0 pv ";
             printMove(root_tb_res.move);
             std::cout << "\n" << std::flush;
@@ -1435,6 +1493,7 @@ void MainThread::search() {
     for (int curr_depth = 1; curr_depth <= Limits.depth; ++curr_depth) {
         const int prev_best_move = best_root_move;
         bool iteration_aborted = false;
+        root_move_stats_count = 0;
 
         for (int pvi = 0; pvi < root_multipv; ++pvi) {
             multi_pv_count = pvi;
@@ -1554,6 +1613,8 @@ void MainThread::search() {
                           << " multipv " << (pvi + 1)
                           << " ";
                 print_score(std::cout, root_pv_lines[pvi].score);
+                if (UCI_ShowWDL)
+                    print_wdl(std::cout, root_pv_lines[pvi].score);
                 std::cout << "nodes " << total_nodes
                           << " nps " << nps
                           << " time " << elapsed_ms
@@ -1571,6 +1632,8 @@ void MainThread::search() {
                       << " seldepth " << seldepth
                       << " ";
             print_score(std::cout, score);
+            if (UCI_ShowWDL)
+                print_wdl(std::cout, score);
             std::cout << "nodes " << total_nodes
                       << " nps " << nps
                       << " time " << elapsed_ms
@@ -1583,7 +1646,7 @@ void MainThread::search() {
             std::cout << "\n" << std::flush;
         }
 
-        // Soft time management scaling based on best-move stability and score drop
+        // Soft time management scaling based on best-move stability, score drop, and root node distribution
         if (Limits.timeset && curr_depth >= 5 && !Limits.ponder.load(std::memory_order_relaxed)) {
             if (best_root_move == prev_best_move) {
                 best_move_stability = std::min(10, best_move_stability + 1);
@@ -1598,6 +1661,23 @@ void MainThread::search() {
 
             if (curr_depth > 5 && score < prev_score - 20) {
                 time_factor *= std::min(1.50, 1.0 + double(prev_score - score) / 120.0);
+            }
+
+            // Node-distribution scaling:
+            // If the best move dominates root node consumption (F >= 0.70), save clock time.
+            // If root moves are in high dispute (F <= 0.40), grant extra time up to max_stoptime.
+            uint64_t total_iter_nodes = 0;
+            uint64_t best_move_iter_nodes = 0;
+            for (int r = 0; r < root_move_stats_count; ++r) {
+                total_iter_nodes += root_move_stats[r].node_count;
+                if (root_move_stats[r].move == best_root_move)
+                    best_move_iter_nodes += root_move_stats[r].node_count;
+            }
+
+            if (total_iter_nodes > 1000) {
+                const double F = static_cast<double>(best_move_iter_nodes) / total_iter_nodes;
+                const double node_factor = std::clamp(1.70 - 1.20 * F, 0.60, 1.40);
+                time_factor *= node_factor;
             }
 
             const uint64_t base_opt = Limits.opt_stoptime - Limits.starttime;

@@ -56,6 +56,12 @@
    - **Auto-Discovery**: Automatically discovers Syzygy tablebases in `../syzygy`, `./syzygy`, or `syzygy` at engine startup, configurable via `setoption name SyzygyPath value <path>`.
    - **In-Tree WDL Probing**: Probes Win-Draw-Loss (`.rtbw`) tablebases during alpha-beta search (`ply > 0`) to prune and cut off won/lost/drawn branches.
 
+9. **50-Move Draw Curve, UCI WDL Model & Node-Distribution Time Management (`src/eval.h`, `src/search.cpp`, `src/uci.cpp`)**:
+   - **50-Move Rule Damping**: Non-linearly compresses leaf static evaluations towards 0 as `fifty` approaches 100 plies (`(100 - fifty) / 40` when `fifty >= 60`, clamping to 0 at 100), eliminating 50-move horizon blindness and strongly incentivizing pawn pushes and captures that reset the clock.
+   - **UCI WDL Model**: Supports `option name UCI_ShowWDL type check default false`. When enabled, calculates and prints exact Win/Draw/Loss permille distribution (`wdl <w> <d> <l>`) on all search and tablebase `info` lines according to the standard logistic chess win-rate model.
+   - **Node-Distribution Dynamic Time Management**: Tracks per-iteration root node distribution $F = \text{best\_move\_nodes} / \text{total\_nodes}$. Reduces thinking time (down to $0.60\times$) when the top move dominates, and expands thinking time (up to $1.40\times$) when root moves are locked in close dispute.
+   - **Forced Single-Move Fast Exit**: Detects positions where only one legal move exists on the board at root and instantly plays in 1ms under time controls, banking valuable clock for critical decisions.
+
 ---
 
 ## Building & Running
