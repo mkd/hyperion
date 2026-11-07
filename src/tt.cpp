@@ -183,11 +183,7 @@ TTProbeResult TT::probe_ex(int alpha, int beta, int depth, bool pv_node) noexcep
             res.bound = e.bound();
             res.tt_pv = e.is_pv();
 
-            int score = e.value;
-            if (score < -MateScore)
-                score += ply;
-            else if (score > MateScore)
-                score -= ply;
+            const int score = score_from_tt(e.value, ply, fifty);
             res.score = score;
 
             // Refresh entry age on hit
@@ -262,10 +258,7 @@ void TT::save(int score, int eval, int best_move, int depth, uint8_t bound, bool
         return;
     }
 
-    if (score < -MateScore)
-        score -= ply;
-    else if (score > MateScore)
-        score += ply;
+    score = score_to_tt(score, ply);
 
     replace->key32 = k32;
     replace->best_move = best_move;

@@ -34,12 +34,78 @@
 #include <atomic>
 #include <cstdint>
 
-inline constexpr int Infinity       = 32000; ///< Larger than any real score.
-inline constexpr int MateValue      = 31000; ///< Score of "mate in 0"; mate in N plies is `MateValue - N`.
-inline constexpr int MateScore      = 30000; ///< Scores beyond this magnitude are mate scores.
-inline constexpr int TBWinScore     = 28000; ///< Base score of a tablebase win.
-inline constexpr int MaxSearchDepth = 128;   ///< Deepest iteration of iterative deepening.
-inline constexpr int MaxHistory     = 16384; ///< Saturation bound of the history tables.
+inline constexpr int Infinity          = 32000; ///< Larger than any real score.
+inline constexpr int MateValue         = 31000; ///< Score of "mate in 0"; mate in N plies is `MateValue - N`.
+inline constexpr int MateInMaxPly      = MateValue - MaxPly;   ///< Lowest mate score (30744).
+inline constexpr int MatedInMaxPly     = -MateInMaxPly;        ///< Highest mated score (-30744).
+
+inline constexpr int TBWinValue        = MateInMaxPly - 1;     ///< Base score of a tablebase win (30743).
+inline constexpr int TBWinInMaxPly     = TBWinValue - MaxPly;  ///< Lowest tablebase win score (30487).
+inline constexpr int TBLossInMaxPly    = -TBWinInMaxPly;       ///< Highest tablebase loss score (-30487).
+
+inline constexpr int MateScore         = MateInMaxPly;         ///< Scores at or beyond this magnitude are mate scores.
+inline constexpr int TBWinScore        = TBWinValue;           ///< Base score of a tablebase win (legacy alias).
+inline constexpr int MaxSearchDepth    = 128;   ///< Deepest iteration of iterative deepening.
+inline constexpr int MaxHistory        = 16384; ///< Saturation bound of the history tables.
+
+[[nodiscard]] constexpr bool is_mate(int score) noexcept {
+    return score >= MateInMaxPly && score <= MateValue;
+}
+
+[[nodiscard]] constexpr bool is_mated(int score) noexcept {
+    return score <= MatedInMaxPly && score >= -MateValue;
+}
+
+[[nodiscard]] constexpr bool is_tb_win(int score) noexcept {
+    return score >= TBWinInMaxPly - 1 && score <= TBWinValue;
+}
+
+[[nodiscard]] constexpr bool is_tb_loss(int score) noexcept {
+    return score <= TBLossInMaxPly + 1 && score >= -TBWinValue;
+}
+
+[[nodiscard]] constexpr bool is_win(int score) noexcept {
+    return score >= TBWinInMaxPly - 1 && score <= MateValue;
+}
+
+[[nodiscard]] constexpr bool is_loss(int score) noexcept {
+    return score <= TBLossInMaxPly + 1 && score >= -MateValue;
+}
+
+[[nodiscard]] constexpr bool is_decisive(int score) noexcept {
+    return is_win(score) || is_loss(score);
+}
+
+[[nodiscard]] inline int score_to_tt(int score, int search_ply) noexcept {
+    if (is_win(score))
+        return score + search_ply;
+    if (is_loss(score))
+        return score - search_ply;
+    return score;
+}
+
+[[nodiscard]] inline int score_from_tt(int score, int search_ply, int fifty_moves) noexcept {
+    if (score == ValueNone)
+        return ValueNone;
+
+    if (is_win(score)) {
+        if (is_mate(score) && (MateValue - score > 100 - fifty_moves))
+            return TBWinInMaxPly - 1;
+        if (TBWinValue - score > 100 - fifty_moves)
+            return TBWinInMaxPly - 1;
+        return score - search_ply;
+    }
+
+    if (is_loss(score)) {
+        if (is_mated(score) && (MateValue + score > 100 - fifty_moves))
+            return TBLossInMaxPly + 1;
+        if (TBWinValue + score > 100 - fifty_moves)
+            return TBLossInMaxPly + 1;
+        return score + search_ply;
+    }
+
+    return score;
+}
 
 inline constexpr int DefaultMultiPV = 1;     ///< Default number of PV lines at root.
 inline constexpr int MinMultiPV     = 1;     ///< Minimum MultiPV option value.

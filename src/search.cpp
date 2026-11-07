@@ -53,20 +53,20 @@ int MultiPV = DefaultMultiPV;
 namespace {
 
 inline void print_score(std::ostream &os, int score) {
-    if (score > MateScore && score <= MateValue) {
+    if (is_mate(score)) {
         const int plies = MateValue - score;
         const int moves = (plies + 1) / 2;
         os << "score mate " << moves << " ";
-    } else if (score >= -MateValue && score < -MateScore) {
-        const int plies = MateValue + score;
+    } else if (is_mated(score)) {
+        const int plies = score - (-MateValue);
         const int moves = (plies + 1) / 2;
         os << "score mate -" << moves << " ";
-    } else if (score > TBWinScore - MaxPly && score <= TBWinScore) {
-        const int dist = std::max(1, (TBWinScore - score + 1) / 2);
-        os << "score mate " << dist << " ";
-    } else if (score >= -TBWinScore && score < -TBWinScore + MaxPly) {
-        const int dist = std::max(1, (score - (-TBWinScore) + 1) / 2);
-        os << "score mate -" << dist << " ";
+    } else if (score >= TBWinInMaxPly - 1) {
+        const int plies = std::max(0, TBWinValue - score);
+        os << "score cp " << (20000 - plies) << " ";
+    } else if (score <= TBLossInMaxPly + 1) {
+        const int plies = std::max(0, score - (-TBWinValue));
+        os << "score cp " << (-20000 + plies) << " ";
     } else {
         os << "score cp " << score << " ";
     }
@@ -74,9 +74,9 @@ inline void print_score(std::ostream &os, int score) {
 
 inline void print_wdl(std::ostream &os, int score) {
     int w = 0, d = 0, l = 0;
-    if (score > MateScore || score >= TBWinScore - MaxPly) {
+    if (is_win(score)) {
         w = 1000; d = 0; l = 0;
-    } else if (score < -MateScore || score <= -TBWinScore + MaxPly) {
+    } else if (is_loss(score)) {
         w = 0; d = 0; l = 1000;
     } else {
         constexpr double a = 100.0;
@@ -525,13 +525,13 @@ int qsearch(int alpha, int beta) {
     int raw_eval = ValueNone;
 
     if (!inCheck) {
-        if (tt_res.hit && tt_res.eval != ValueNone && std::abs(tt_res.eval) < MateScore) {
+        if (tt_res.hit && tt_res.eval != ValueNone && !is_decisive(tt_res.eval)) {
             raw_eval = tt_res.eval;
         } else {
             raw_eval = evaluate();
         }
         int stand_pat = adjustEvalWithCorrHist(raw_eval);
-        if (tt_res.hit && std::abs(tt_res.score) < MateScore) {
+        if (tt_res.hit && !is_decisive(tt_res.score)) {
             if (tt_res.bound == hash_type_exact ||
                 (tt_res.bound == hash_type_beta && tt_res.score > stand_pat) ||
                 (tt_res.bound == hash_type_alpha && tt_res.score < stand_pat)) {
@@ -592,16 +592,27 @@ int qsearch(int alpha, int beta) {
     for (int count = 0; count < moveList.count; ++count) {
         const int move = pickNextMove(moveList, move_scores, count);
 
-        if (!inCheck) {
+        const bool is_capture = (getMoveCapture(move) != 0);
+        const bool is_promo   = (getPromo(move) != 0);
+        const bool gives_chk  = givesCheck(move);
+
+        if (inCheck) {
+            // Prune quiet evasions beyond the first 2, and prune catastrophic blunders
+            if (!is_capture && !is_promo && !gives_chk && legal_moves >= 2)
+                continue;
+
+            if (!see_ge(move, -120))
+                continue;
+        } else {
             // Delta pruning
             int gain = 200;
             if (getEp(move)) {
                 gain += see_piece_values[P];
-            } else if (getMoveCapture(move)) {
+            } else if (is_capture) {
                 const int cap = mailbox[getMoveTarget(move)];
                 if (cap != NoPiece) gain += see_piece_values[cap];
             }
-            if (getPromo(move)) {
+            if (is_promo) {
                 gain += see_piece_values[getPromo(move)] - see_piece_values[P];
             }
             if (best_score + gain < alpha)
@@ -753,10 +764,10 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
             int tb_score = 0;
             uint8_t tb_bound = hash_type_exact;
             if (res == TB_LOSS) {
-                tb_score = -TBWinScore + ply;
+                tb_score = -TBWinValue + ply;
                 tb_bound = hash_type_alpha;
             } else if (res == TB_WIN) {
-                tb_score = TBWinScore - ply;
+                tb_score = TBWinValue - ply;
                 tb_bound = hash_type_beta;
             } else {
                 tb_score = 0;
@@ -787,7 +798,7 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
         if (static_eval == ValueNone)
             static_eval = eval = adjustEvalWithCorrHist(raw_eval);
     } else {
-        if (tt_res.hit && tt_res.eval != ValueNone && std::abs(tt_res.eval) < MateScore) {
+        if (tt_res.hit && tt_res.eval != ValueNone && !is_decisive(tt_res.eval)) {
             raw_eval = tt_res.eval;
         } else {
             raw_eval = evaluate();
@@ -796,7 +807,7 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
         static_eval_stack[ply] = static_eval;
         eval = static_eval;
 
-        if (tt_res.hit && std::abs(tt_res.score) < MateScore) {
+        if (tt_res.hit && !is_decisive(tt_res.score)) {
             if (tt_res.bound == hash_type_exact ||
                 (tt_res.bound == hash_type_beta && tt_res.score > eval) ||
                 (tt_res.bound == hash_type_alpha && tt_res.score < eval)) {
@@ -825,7 +836,7 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
         }
 
         // Reverse Futility Pruning (Static Null Move Pruning)
-        if (!pv_node && !excludedMove && depth <= (current_thread->seek_mate ? 4 : 8) && std::abs(beta) < MateScore) {
+        if (!pv_node && !excludedMove && depth <= (current_thread->seek_mate ? 4 : 8) && !is_decisive(beta)) {
             const int rfp_margin = 70 * depth - 22 * (improving + tt_pv);
             if (eval - rfp_margin >= beta)
                 return (eval + beta) / 2;
@@ -866,7 +877,7 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
                 return 0;
 
             if (null_score >= beta) {
-                if (null_score >= MateScore)
+                if (is_win(null_score))
                     null_score = beta;
 
                 if (nmp_min_ply || depth < 14)
@@ -883,7 +894,7 @@ int negamax(int alpha, int beta, int depth, bool cut_node, int excludedMove) {
         }
 
         // ProbCut
-        if (!pv_node && !excludedMove && !current_thread->seek_mate && depth >= 5 && std::abs(beta) < MateScore) {
+        if (!pv_node && !excludedMove && !current_thread->seek_mate && depth >= 5 && !is_decisive(beta)) {
             const int probBeta = beta + 190;
             if (!(tt_res.hit && tt_res.depth >= depth - 3 && tt_res.score < probBeta)) {
                 MoveList_t pcMoves;
@@ -1021,7 +1032,7 @@ moves_loop:
         const bool gives_check = givesCheck(move);
 
         // Pre-move pruning (before makeMove and NNUE update!)
-        if (ply > 0 && !pv_node && !inCheck && moves_searched > 0 && best_score > -MateScore) {
+        if (ply > 0 && !pv_node && !inCheck && moves_searched > 0 && !is_loss(best_score) && !current_thread->seek_mate) {
             if (is_quiet) {
                 if (!gives_check) {
                     // Late Move Pruning (LMP)
@@ -1058,9 +1069,9 @@ moves_loop:
         } else if (ply > 0 && depth >= 7 && move == bestmove && !excludedMove &&
             tt_res.hit && tt_res.depth >= depth - 3 &&
             (tt_res.bound == hash_type_beta || tt_res.bound == hash_type_exact) &&
-            std::abs(tt_res.score) < MateScore) {
+            !is_decisive(tt_res.score) && !current_thread->seek_mate) {
 
-            const int sBeta = std::max(-MateScore + 1, tt_res.score - 2 * depth);
+            const int sBeta = std::max(-MateInMaxPly + 1, tt_res.score - 2 * depth);
             const int sDepth = (depth - 1) / 2;
 
             const int sScore = negamax(sBeta - 1, sBeta, sDepth, cut_node, move);
@@ -1239,7 +1250,7 @@ moves_loop:
             // Learn how far the static eval was from the search result.
             if (!inCheck &&
                 !(bestmove && (getMoveCapture(bestmove) || getPromo(bestmove))) &&
-                std::abs(best_score) < MateScore &&
+                !is_decisive(best_score) &&
                 ((hash_flag == hash_type_exact) ||
                  (hash_flag == hash_type_beta && best_score > static_eval) ||
                  (hash_flag == hash_type_alpha && best_score < static_eval))) {
@@ -1349,10 +1360,10 @@ int root_tb_probe(RootTbResult &best_res, RootTbResult *all_results, int max_res
         if (wdl == TB_WIN) {
             if (dtz == 1 && is_direct_checkmate(move))
                 return MateValue - 1;
-            return TBWinScore - dtz;
+            return TBWinValue - dtz;
         }
         if (wdl == TB_LOSS)
-            return -TBWinScore + dtz;
+            return -TBWinValue + dtz;
         if (wdl == TB_CURSED_WIN)
             return 1;
         if (wdl == TB_BLESSED_LOSS)
@@ -1530,8 +1541,7 @@ void MainThread::search() {
 
     for (int curr_depth = 1; curr_depth <= Limits.depth; ++curr_depth) {
         current_thread->seek_mate = (curr_depth >= 4 &&
-            std::abs(score) >= 750 + 220000 / (curr_depth * curr_depth) &&
-            std::abs(score) < MateScore);
+            std::abs(score) >= 750 + 220000 / (curr_depth * curr_depth));
         const int prev_best_move = best_root_move;
         bool iteration_aborted = false;
         root_move_stats_count = 0;
@@ -1585,12 +1595,13 @@ void MainThread::search() {
                     line_score = iter_score;
 
                     if (line_score <= alpha) {
-                        beta = (alpha + beta) / 2;
+                        beta  = alpha;
                         alpha = std::max(-Infinity, line_score - delta);
                         asp_depth = curr_depth;
                     } else if (line_score >= beta) {
-                        beta = std::min(Infinity, line_score + delta);
-                        if (asp_depth > 1 && std::abs(line_score) < MateScore)
+                        alpha = std::max(-Infinity, beta - delta);
+                        beta  = std::min(Infinity, line_score + delta);
+                        if (asp_depth > 1 && !is_decisive(line_score))
                             asp_depth--;
                     } else {
                         if (pv_table[0][0])
@@ -1599,10 +1610,6 @@ void MainThread::search() {
                     }
 
                     delta += delta / 2 + 4;
-                    if (delta > 500) {
-                        alpha = -Infinity;
-                        beta  = Infinity;
-                    }
                 }
             } else {
                 followPV = can_follow_pv;
