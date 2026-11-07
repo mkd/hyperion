@@ -54,9 +54,13 @@ namespace {
 
 inline void print_score(std::ostream &os, int score) {
     if (score > MateScore && score <= MateValue) {
-        os << "score mate " << (MateValue - score) / 2 + 1 << " ";
+        const int plies = MateValue - score;
+        const int moves = (plies + 1) / 2;
+        os << "score mate " << moves << " ";
     } else if (score >= -MateValue && score < -MateScore) {
-        os << "score mate " << -(score + MateValue) / 2 - 1 << " ";
+        const int plies = MateValue + score;
+        const int moves = (plies + 1) / 2;
+        os << "score mate -" << moves << " ";
     } else if (score > TBWinScore - MaxPly && score <= TBWinScore) {
         const int dist = std::max(1, (TBWinScore - score + 1) / 2);
         os << "score mate " << dist << " ";

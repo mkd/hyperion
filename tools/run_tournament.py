@@ -226,52 +226,76 @@ def main():
     game_ids = list(range(args.start, args.end + 1))
     results = []
 
-    # Run games in parallel pool
+    # Run games in parallel pool and stream updates immediately
+    lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         future_to_id = {
             executor.submit(play_single_game, gid, args.new, args.base, args.time): gid
             for gid in game_ids
         }
         for future in as_completed(future_to_id):
-            res = future.result()
-            results.append(res)
+            r = future.result()
+            with lock:
+                if r["new_point"] == 1.0:
+                    state["new_wins"] += 1
+                elif r["new_point"] == 0.0:
+                    state["base_wins"] += 1
+                else:
+                    state["draws"] += 1
 
-    # Sort results by game_id for consistent display
-    results.sort(key=lambda r: r["game_id"])
+                state["games"].append({
+                    "game_id": r["game_id"],
+                    "white": r["white"],
+                    "black": r["black"],
+                    "opening": r["opening"],
+                    "result": r["result"],
+                    "winner": r["winner"],
+                    "moves": r["moves"],
+                    "reason": r["reason"]
+                })
 
-    with open(args.pgn, "a") as pgn_file:
-        for r in results:
-            if r["new_point"] == 1.0:
-                state["new_wins"] += 1
-            elif r["new_point"] == 0.0:
-                state["base_wins"] += 1
-            else:
-                state["draws"] += 1
+                with open(args.pgn, "a") as pgn_file:
+                    pgn_file.write(r["pgn"] + "\n\n")
 
-            state["games"].append({
-                "game_id": r["game_id"],
-                "white": r["white"],
-                "black": r["black"],
-                "opening": r["opening"],
-                "result": r["result"],
-                "winner": r["winner"],
-                "moves": r["moves"],
-                "reason": r["reason"]
-            })
+                with open(args.state, "w") as f:
+                    json.dump(state, f, indent=2)
 
-            pgn_file.write(r["pgn"] + "\n\n")
+                total_played = state["new_wins"] + state["base_wins"] + state["draws"]
+                points = state["new_wins"] + 0.5 * state["draws"]
+                pct = (points / total_played) * 100.0 if total_played > 0 else 0.0
 
-            total_played = state["new_wins"] + state["base_wins"] + state["draws"]
-            points = state["new_wins"] + 0.5 * state["draws"]
-            pct = (points / total_played) * 100.0 if total_played > 0 else 0.0
+                print(f"Game {r['game_id']:03d}/{args.total:03d}: {r['white']:13s} vs {r['black']:13s} | "
+                      f"{r['opening']:23s} | {r['result']:7s} ({r['moves']:2d} moves, {r['reason']:15s}) | "
+                      f"Score: +{state['new_wins']} -{state['base_wins']} ={state['draws']} ({pct:.1f}%)",
+                      flush=True)
 
-            print(f"Game {r['game_id']:02d}/{args.total:02d}: {r['white']:13s} vs {r['black']:13s} | "
-                  f"{r['opening']:23s} | {r['result']:7s} ({r['moves']:2d} moves, {r['reason']:15s}) | "
-                  f"Score (New): +{state['new_wins']} -{state['base_wins']} ={state['draws']} ({pct:.1f}%)",
-                  flush=True)
+    # Print final summary if all requested games have completed
+    total = state["new_wins"] + state["base_wins"] + state["draws"]
+    if total > 0:
+        w = state["new_wins"]
+        l = state["base_wins"]
+        d = state["draws"]
+        score = (w + 0.5 * d) / total
+        import math
+        if score <= 0.0:
+            elo = -999.0
+            error = 0.0
+        elif score >= 1.0:
+            elo = 999.0
+            error = 0.0
+        else:
+            elo = -400.0 * math.log10(1.0 / score - 1.0)
+            var = (w * (1.0 - score)**2 + l * (0.0 - score)**2 + d * (0.5 - score)**2) / (total - 1 if total > 1 else 1)
+            se = math.sqrt(var / total)
+            error = 400.0 / (math.log(10) * score * (1.0 - score)) * 1.96 * se
 
-    with open(args.state, "w") as f:
-        json.dump(state, f, indent=2)
+        print("\n" + "=" * 60, flush=True)
+        print(f"  TOURNAMENT SUMMARY: Hyperion-New vs Hyperion-Base", flush=True)
+        print("=" * 60, flush=True)
+        print(f"  Total Games : {total}", flush=True)
+        print(f"  Score       : +{w} -{l} ={d}  ({score * 100:.1f}%)", flush=True)
+        print(f"  Elo Diff    : {elo:+.1f} +/- {error:.1f} (95% CI)", flush=True)
+        print("=" * 60 + "\n", flush=True)
 
 
 if __name__ == "__main__":

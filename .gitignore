@@ -25,3 +25,11 @@ tournament_state.json
 # Syzygy tablebases
 syzygy/
 
+
+# Neural networks
+*.nnue
+
+# Tournament temporary files
+hyperion_baseline
+tournament_*.json
+

@@ -44,8 +44,13 @@
 
 using std::cin, std::cout, std::flush, std::getline, std::istringstream, std::string, std::to_string, std::vector, std::ws;
 
+#include "stockfish_probe/probe.h"
+#include <iomanip>
+
 uint64_t perft_nodes = 0;
 bool UCI_ShowWDL = false;
+static uint64_t ponder_searches = 0;
+static uint64_t ponder_hits = 0;
 
 /// Recursive perft: counts leaf nodes, verifying legality with makeMove().
 void perft_driver(int depth) {
@@ -207,6 +212,7 @@ void parseGo(const string &line) {
             Limits.timeset = false;
         } else if (token == "ponder") {
             Limits.ponder.store(true, std::memory_order_relaxed);
+            ponder_searches++;
         } else if (token == "wtime" && sideToMove == White) {
             ss >> Limits.time;
         } else if (token == "btime" && sideToMove == Black) {
@@ -347,6 +353,8 @@ void uci() {
             Threads.wait_for_search_finished();
             TT::clear();
             Threads.clear_histories();
+            ponder_searches = 0;
+            ponder_hits = 0;
             parsePosition("position startpos");
         } else if (token == "go") {
             parseGo(input);
@@ -356,6 +364,7 @@ void uci() {
             Threads.wait_for_search_finished();
         } else if (token == "ponderhit") {
             if (Limits.ponder.load(std::memory_order_relaxed)) {
+                ponder_hits++;
                 Limits.ponder.store(false, std::memory_order_release);
                 const uint64_t now = getTimeMs();
                 const uint64_t elapsed = now - Limits.starttime;
@@ -363,6 +372,9 @@ void uci() {
                 Limits.opt_stoptime += elapsed;
                 Limits.max_stoptime += elapsed;
                 Limits.stoptime     = Limits.max_stoptime;
+                const double rate = ponder_searches > 0 ? (100.0 * ponder_hits / ponder_searches) : 0.0;
+                cout << "info string Ponder hit: " << ponder_hits << "/" << ponder_searches
+                     << " (" << std::fixed << std::setprecision(1) << rate << "%)\n" << flush;
             }
         } else if (token == "quit") {
             if (!Limits.timeset && Limits.depth >= MaxSearchDepth - 1) {
@@ -380,6 +392,7 @@ void uci() {
                  << " min " << MinMultiPV << " max " << MaxMultiPV << "\n";
             cout << "option name Ponder type check default false\n";
             cout << "option name UCI_ShowWDL type check default false\n";
+            cout << "option name EvalFile type string default nn-1a298aa575a0.nnue\n";
             cout << "option name SyzygyPath type string default " << SyzygyPath << "\n";
             cout << "uciok\n" << flush;
         } else if (token == "setoption") {
@@ -411,6 +424,13 @@ void uci() {
                 string val_tok, val;
                 ss >> val_tok >> val;
                 UCI_ShowWDL = (val == "true");
+            } else if (opt_name == "EvalFile") {
+                string val_tok, path;
+                ss >> val_tok; // "value"
+                getline(ss >> ws, path);
+                if (!path.empty()) {
+                    Stockfish::Probe::init(path.c_str());
+                }
             } else if (opt_name == "SyzygyPath") {
                 string val_tok, path;
                 ss >> val_tok; // "value"

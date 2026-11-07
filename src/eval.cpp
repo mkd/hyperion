@@ -35,24 +35,23 @@
 #include <string>
 
 void initEval(const char* argv0) {
-    std::string big_net   = "nn-b1a57edbea57.nnue";
-    std::string small_net = "nn-baff1ede1f90.nnue";
+    std::string net_name = "nn-1a298aa575a0.nnue";
 
-    // If the nets are not in the working directory, look next to the executable
+    // If the net is not in the working directory, look next to the executable
     // (and in its `src/` sibling) so Hyperion can be launched from anywhere.
     namespace fs = std::filesystem;
-    if (!fs::exists(big_net) && argv0) {
+    if (!fs::exists(net_name) && argv0) {
         const fs::path exe_dir = fs::path(argv0).parent_path();
-        if (fs::exists(exe_dir / big_net)) {
-            big_net   = (exe_dir / big_net).string();
-            small_net = (exe_dir / small_net).string();
-        } else if (fs::exists(exe_dir / "src" / big_net)) {
-            big_net   = (exe_dir / "src" / big_net).string();
-            small_net = (exe_dir / "src" / small_net).string();
+        if (fs::exists(exe_dir / net_name)) {
+            net_name = (exe_dir / net_name).string();
+        } else if (fs::exists(exe_dir / "src" / net_name)) {
+            net_name = (exe_dir / "src" / net_name).string();
+        } else if (fs::exists("nn-89cb98a217f7.nnue")) {
+            net_name = "nn-89cb98a217f7.nnue";
         }
     }
 
-    Stockfish::Probe::init(big_net.c_str(), small_net.c_str());
+    Stockfish::Probe::init(net_name.c_str());
 }
 
 int evaluate() noexcept {

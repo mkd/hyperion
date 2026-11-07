@@ -1,6 +1,6 @@
 /*
   Stockfish, a UCI chess playing engine derived from Glaurung 2.1
-  Copyright (C) 2004-2024 The Stockfish developers (see AUTHORS file)
+  Copyright (C) 2004-2026 The Stockfish developers (see AUTHORS file)
 
   Stockfish is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -19,171 +19,87 @@
 #include "evaluate.h"
 
 #include <algorithm>
+#include <cassert>
+#include <cmath>
 #include <cstdlib>
-#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
-#include <unordered_map>
-#include <vector>
 
-#include "incbin/incbin.h"
-#include "nnue/evaluate_nnue.h"
+#include "misc.h"
+#include "nnue/network.h"
+#include "nnue/nnue_misc.h"
 #include "position.h"
 #include "types.h"
-
-// Macro to embed the default efficiently updatable neural network (NNUE) file
-// data in the engine binary (using incbin.h, by Dale Weiler).
-// This macro invocation will declare the following three variables
-//     const unsigned char        gEmbeddedNNUEData[];  // a pointer to the
-//     embedded data const unsigned char *const gEmbeddedNNUEEnd;     // a
-//     marker to the end const unsigned int         gEmbeddedNNUESize;    // the
-//     size of the embedded file
-// Note that this does not work in Microsoft Visual Studio.
-#if !defined(_MSC_VER) && !defined(NNUE_EMBEDDING_OFF)
-INCBIN(EmbeddedNNUEBig, EvalFileDefaultNameBig);
-INCBIN(EmbeddedNNUESmall, EvalFileDefaultNameSmall);
-#else
-const unsigned char gEmbeddedNNUEBigData[1] = {0x0};
-const unsigned char *const gEmbeddedNNUEBigEnd = &gEmbeddedNNUEBigData[1];
-const unsigned int gEmbeddedNNUEBigSize = 1;
-const unsigned char gEmbeddedNNUESmallData[1] = {0x0};
-const unsigned char *const gEmbeddedNNUESmallEnd = &gEmbeddedNNUESmallData[1];
-const unsigned int gEmbeddedNNUESmallSize = 1;
-#endif
+// #include "uci.h"
+#include "nnue/nnue_accumulator.h"
 
 namespace Stockfish {
 
-namespace Eval {
+// Evaluate is the evaluator for the outer world. It returns a static evaluation
+// of the position from the point of view of the side to move.
+Value Eval::evaluate(const Eval::NNUE::Network&     network,
+                     const Position&                pos,
+                     Eval::NNUE::AccumulatorStack&  accumulators,
+                     Eval::NNUE::AccumulatorCaches& caches,
+                     int                            optimism) {
 
-NNUE::EvalFiles NNUE::load_networks(const std::string &rootDirectory,
-                                    NNUE::EvalFiles evalFiles) {
+    assert(!pos.checkers());
 
-  for (auto &[netSize, evalFile] : evalFiles) {
-    std::string user_eval_file = evalFile.defaultName;
+    auto [psqt, positional] = network.evaluate(pos, accumulators, caches);
 
-#if defined(DEFAULT_NNUE_DIRECTORY)
-    std::vector<std::string> dirs = {"<internal>", "", rootDirectory,
-                                     stringify(DEFAULT_NNUE_DIRECTORY)};
-#else
-    std::vector<std::string> dirs = {"<internal>", "", rootDirectory};
-#endif
+    Value nnue = psqt + positional;
 
-    for (const std::string &directory : dirs) {
-      if (evalFile.current != user_eval_file) {
-        if (directory != "<internal>") {
-          std::ifstream stream(directory + user_eval_file, std::ios::binary);
-          auto description = NNUE::load_eval(stream, netSize);
+    // Blend optimism and eval with nnue complexity
+    int nnueComplexity = std::abs(psqt - positional);
+    optimism += optimism * i64(nnueComplexity) / 476;
+    nnue -= nnue * i64(nnueComplexity) / 18236;
 
-          if (description.has_value()) {
-            evalFile.current = user_eval_file;
-            evalFile.netDescription = description.value();
-          }
-        }
+    int material = 534 * pos.count<PAWN>() + pos.non_pawn_material();
+    int v        = nnue + (nnue * i64(material) + optimism * i64(7675)) / 91000;
 
-        if (directory == "<internal>" &&
-            user_eval_file == evalFile.defaultName) {
-          // C++ way to prepare a buffer for a memory stream
-          class MemoryBuffer : public std::basic_streambuf<char> {
-          public:
-            MemoryBuffer(char *p, size_t n) {
-              setg(p, p, p + n);
-              setp(p, p + n);
-            }
-          };
+    // Damp down the evaluation linearly when shuffling
+    v -= v * pos.rule50_count() / 199;
 
-          MemoryBuffer buffer(const_cast<char *>(reinterpret_cast<const char *>(
-                                  netSize == Small ? gEmbeddedNNUESmallData
-                                                   : gEmbeddedNNUEBigData)),
-                              size_t(netSize == Small ? gEmbeddedNNUESmallSize
-                                                      : gEmbeddedNNUEBigSize));
-          (void)gEmbeddedNNUEBigEnd; // Silence warning on unused variable
-          (void)gEmbeddedNNUESmallEnd;
+    // Guarantee evaluation does not hit the tablebase range
+    v = std::clamp(v, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
 
-          std::istream stream(&buffer);
-          auto description = NNUE::load_eval(stream, netSize);
-
-          if (description.has_value()) {
-            evalFile.current = user_eval_file;
-            evalFile.netDescription = description.value();
-          }
-        }
-      }
-    }
-  }
-
-  return evalFiles;
+    return v;
 }
 
-// Distance between two squares
-int distance(Square s1, Square s2) {
-  return std::max(std::abs(file_of(s1) - file_of(s2)),
-                  std::abs(rank_of(s1) - rank_of(s2)));
+// Like evaluate(), but instead of returning a value, it returns
+// a string (suitable for outputting to stdout) that contains the detailed
+// descriptions and values of each evaluation term. Useful for debugging.
+// Trace scores are from white's point of view
+std::string Eval::trace(Position& pos, const Eval::NNUE::Network& network) {
+
+    if (pos.checkers())
+        return "Final evaluation: none (in check)";
+
+    auto accumulators = std::make_unique<Eval::NNUE::AccumulatorStack>();
+    auto caches       = std::make_unique<Eval::NNUE::AccumulatorCaches>(network);
+
+    std::stringstream ss;
+    ss << std::showpoint << std::noshowpos << std::fixed << std::setprecision(2);
+    ss << '\n' << NNUE::trace(pos, network, *caches) << '\n';
+
+    ss << std::showpoint << std::showpos << std::fixed << std::setprecision(2) << std::setw(15);
+
+    auto [psqt, positional] = network.evaluate(pos, *accumulators, *caches);
+    Value v                 = psqt + positional;
+    ss << "NNUE evaluation          " << v << " (side to move, internal units)\n";
+    v = pos.side_to_move() == WHITE ? v : -v;
+    ss << "NNUE evaluation        " << 0.01 * v << " (white side)\n";
+
+    v = evaluate(network, pos, *accumulators, *caches, VALUE_ZERO);
+    v = pos.side_to_move() == WHITE ? v : -v;
+
+    ss << "Final evaluation      ";
+    ss << 0.01 * v << " (white side)";
+    ss << " [with scaled NNUE, ...]\n";
+
+    return ss.str();
 }
 
-// Mop-up evaluation to drive the enemy king to the edge in won endgames
-int mop_up(const Position &pos, Color us) {
-  Color them = ~us;
-
-  // Only apply mop-up if we have a significant material advantage
-  if (pos.non_pawn_material(us) < RookValue ||
-      pos.non_pawn_material(them) != 0) {
-    return 0;
-  }
-
-  // Bonus for pushing enemy king to the edge
-  Square k_them = pos.square<KING>(them);
-  int file_dist = std::min(int(file_of(k_them)), int(FILE_H - file_of(k_them)));
-  int rank_dist = std::min(int(rank_of(k_them)), int(RANK_8 - rank_of(k_them)));
-  int push_to_edge_bonus = (3 - file_dist) + (3 - rank_dist);
-
-  // Bonus for bringing our king closer
-  Square k_us = pos.square<KING>(us);
-  int close_kings_bonus = 14 - distance(k_us, k_them);
-
-  // Scale the bonus
-  return (push_to_edge_bonus + close_kings_bonus) * 50;
-}
-
-} // namespace Eval
-
-// Returns a static, purely materialistic evaluation of the position from
-// the point of view of the given color. It can be divided by PawnValue to get
-// an approximation of the material advantage on the board in terms of pawns.
-int Eval::simple_eval(const Position &pos, Color c) {
-  return PawnValue * (pos.count<PAWN>(c) - pos.count<PAWN>(~c)) +
-         (pos.non_pawn_material(c) - pos.non_pawn_material(~c));
-}
-
-Value Eval::evaluate(const Position &pos) {
-  if (pos.state() == nullptr) {
-      fprintf(stderr, "CRITICAL ERROR: pos.state() is nullptr in evaluate! pos=%p\n", (const void*)&pos);
-      fflush(stderr);
-      abort();
-  }
-
-  int simpleEval = simple_eval(pos, pos.side_to_move());
-  bool smallNet = std::abs(simpleEval) > 1050;
-
-  int nnueComplexity;
-
-  Value nnue = smallNet
-                   ? NNUE::evaluate<NNUE::Small>(pos, true, &nnueComplexity)
-                   : NNUE::evaluate<NNUE::Big>(pos, true, &nnueComplexity);
-
-  nnue -= nnue * (nnueComplexity + std::abs(simpleEval - nnue)) / 32768;
-
-  int npm = pos.non_pawn_material() / 64;
-  int v = (nnue * (915 + npm + 9 * pos.count<PAWN>())) / 1024;
-
-  // Damp down the evaluation linearly when shuffling
-  int shuffling = pos.rule50_count();
-  v = v * (200 - shuffling) / 214;
-
-  // Guarantee evaluation does not hit the tablebase range
-  v = std::clamp(v, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
-
-  v += mop_up(pos, pos.side_to_move());
-
-  return v;
-}
-} // namespace Stockfish
+}  // namespace Stockfish

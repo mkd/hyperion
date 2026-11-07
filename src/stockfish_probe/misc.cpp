@@ -1,6 +1,6 @@
 /*
   Stockfish, a UCI chess playing engine derived from Glaurung 2.1
-  Copyright (C) 2004-2024 The Stockfish developers (see AUTHORS file)
+  Copyright (C) 2004-2026 The Stockfish developers (see AUTHORS file)
 
   Stockfish is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -18,66 +18,47 @@
 
 #include "misc.h"
 
-#ifdef _WIN32
-    #if _WIN32_WINNT < 0x0601
-        #undef _WIN32_WINNT
-        #define _WIN32_WINNT 0x0601  // Force to include needed API prototypes
-    #endif
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <cctype>
+#include <cstring>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <mutex>
+#include <sstream>
+#include <string_view>
 
+#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
-
+    #include <direct.h>
     #include <windows.h>
-// The needed Windows API for processor groups could be missed from old Windows
-// versions, so instead of calling them directly (forcing the linker to resolve
-// the calls at compile time), try to load them at runtime. To do this we need
-// first to define the corresponding function pointers.
-extern "C" {
-using fun1_t = bool (*)(LOGICAL_PROCESSOR_RELATIONSHIP,
-                        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
-                        PDWORD);
-using fun2_t = bool (*)(USHORT, PGROUP_AFFINITY);
-using fun3_t = bool (*)(HANDLE, CONST GROUP_AFFINITY*, PGROUP_AFFINITY);
-using fun4_t = bool (*)(USHORT, PGROUP_AFFINITY, USHORT, PUSHORT);
-using fun5_t = WORD (*)();
-using fun6_t = bool (*)(HANDLE, DWORD, PHANDLE);
-using fun7_t = bool (*)(LPCSTR, LPCSTR, PLUID);
-using fun8_t = bool (*)(HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD);
-}
+    #include <shellapi.h>
 #endif
-
-#include <atomic>
-#include <cmath>
-#include <cstdlib>
-#include <fstream>
-#include <iostream>
-#include <mutex>
-#include <string_view>
 
 #include "types.h"
 
-#if defined(__linux__) && !defined(__ANDROID__)
-    #include <sys/mman.h>
-#endif
-
-#if defined(__APPLE__) || defined(__ANDROID__) || defined(__OpenBSD__) \
-  || (defined(__GLIBCXX__) && !defined(_GLIBCXX_HAVE_ALIGNED_ALLOC) && !defined(_WIN32)) \
-  || defined(__e2k__)
-    #define POSIXALIGNEDALLOC
-    #include <stdlib.h>
-#endif
-
 namespace Stockfish {
+
+namespace fs = std::filesystem;
 
 namespace {
 
 // Version number or dev.
-constexpr std::string_view version = "16.1";
+constexpr std::string_view version = "19";
 
 // Our fancy logging facility. The trick here is to replace cin.rdbuf() and
 // cout.rdbuf() with two Tie objects that tie cin and cout to a file stream. We
-// can toggle the logging of std::cout and std:cin at runtime whilst preserving
+// can toggle the logging of std::cout and std::cin at runtime whilst preserving
 // usual I/O functionality, all without changing a single line of code!
 // Idea from http://groups.google.com/group/comp.lang.c++/msg/1d941c0f26ea0d81
 
@@ -116,7 +97,7 @@ class Logger {
     Tie           in, out;
 
    public:
-    static void start(const std::string& fname) {
+    static void start(const fs::path& fname) {
 
         static Logger l;
 
@@ -144,6 +125,60 @@ class Logger {
 };
 
 }  // namespace
+
+
+// Returns the full name of the current Stockfish version.
+//
+// For local dev compiles we try to append the commit SHA and
+// commit date from git. If that fails only the local compilation
+// date is set and "nogit" is specified:
+//      Stockfish dev-YYYYMMDD-SHA
+//      or
+//      Stockfish dev-YYYYMMDD-nogit
+//
+// For releases (non-dev builds) we only include the version number:
+//      Stockfish version
+std::string engine_version_info() {
+    std::stringstream ss;
+    ss << "Stockfish " << version << std::setfill('0');
+
+    if constexpr (version == "dev")
+    {
+        ss << "-";
+#ifdef GIT_DATE
+        ss << stringify(GIT_DATE);
+#else
+        constexpr std::string_view months("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec");
+
+        std::string       month, day, year;
+        std::stringstream date(__DATE__);  // From compiler, format is "Sep 21 2008"
+
+        date >> month >> day >> year;
+        ss << year << std::setw(2) << std::setfill('0') << (1 + months.find(month) / 4)
+           << std::setw(2) << std::setfill('0') << day;
+#endif
+
+#ifdef GIT_DIFFINDEX
+        ss << "-m";
+#endif
+
+        ss << "-";
+
+#ifdef GIT_SHA
+        ss << stringify(GIT_SHA);
+#else
+        ss << "nogit";
+#endif
+    }
+
+    return ss.str();
+}
+
+std::string engine_info(bool to_uci) {
+    return engine_version_info() + (to_uci ? "\nid author " : " by ")
+         + "the Stockfish developers (see AUTHORS file)";
+}
+
 
 // Returns a string trying to describe the compiler we use
 std::string compiler_info() {
@@ -220,6 +255,9 @@ std::string compiler_info() {
 
     compiler += "\nCompilation settings       : ";
     compiler += (Is64Bit ? "64bit" : "32bit");
+#if defined(USE_AVX512ICL)
+    compiler += " AVX512ICL";
+#endif
 #if defined(USE_VNNI)
     compiler += " VNNI";
 #endif
@@ -239,12 +277,18 @@ std::string compiler_info() {
 #if defined(USE_SSE2)
     compiler += " SSE2";
 #endif
-    compiler += (HasPopCnt ? " POPCNT" : "");
 #if defined(USE_NEON_DOTPROD)
     compiler += " NEON_DOTPROD";
 #elif defined(USE_NEON)
     compiler += " NEON";
 #endif
+#if defined(USE_LASX)
+    compiler += " LASX";
+#endif
+#if defined(USE_LSX)
+    compiler += " LSX";
+#endif
+    compiler += (HasPopCnt ? " POPCNT" : "");
 
 #if !defined(NDEBUG)
     compiler += " DEBUG";
@@ -268,55 +312,84 @@ constexpr int MaxDebugSlots = 32;
 
 namespace {
 
-template<size_t N>
+template<usize N>
 struct DebugInfo {
-    std::atomic<int64_t> data[N] = {0};
+    std::array<std::atomic<i64>, N> data = {0};
 
-    constexpr inline std::atomic<int64_t>& operator[](int index) { return data[index]; }
+    [[nodiscard]] constexpr std::atomic<i64>& operator[](usize index) {
+        assert(index < N);
+        return data[index];
+    }
+
+    constexpr DebugInfo& operator=(const DebugInfo& other) {
+        for (usize i = 0; i < N; i++)
+            data[i].store(other.data[i].load());
+        return *this;
+    }
 };
 
-DebugInfo<2> hit[MaxDebugSlots];
-DebugInfo<2> mean[MaxDebugSlots];
-DebugInfo<3> stdev[MaxDebugSlots];
-DebugInfo<6> correl[MaxDebugSlots];
+struct DebugExtremes: public DebugInfo<3> {
+    DebugExtremes() {
+        data[1] = std::numeric_limits<i64>::min();
+        data[2] = std::numeric_limits<i64>::max();
+    }
+};
+
+std::array<DebugInfo<2>, MaxDebugSlots>  hit;
+std::array<DebugInfo<2>, MaxDebugSlots>  mean;
+std::array<DebugInfo<3>, MaxDebugSlots>  stdev;
+std::array<DebugInfo<6>, MaxDebugSlots>  correl;
+std::array<DebugExtremes, MaxDebugSlots> extremes;
 
 }  // namespace
 
 void dbg_hit_on(bool cond, int slot) {
 
-    ++hit[slot][0];
+    ++hit.at(slot)[0];
     if (cond)
-        ++hit[slot][1];
+        ++hit.at(slot)[1];
 }
 
-void dbg_mean_of(int64_t value, int slot) {
+void dbg_mean_of(i64 value, int slot) {
 
-    ++mean[slot][0];
-    mean[slot][1] += value;
+    ++mean.at(slot)[0];
+    mean.at(slot)[1] += value;
 }
 
-void dbg_stdev_of(int64_t value, int slot) {
+void dbg_stdev_of(i64 value, int slot) {
 
-    ++stdev[slot][0];
-    stdev[slot][1] += value;
-    stdev[slot][2] += value * value;
+    ++stdev.at(slot)[0];
+    stdev.at(slot)[1] += value;
+    stdev.at(slot)[2] += value * value;
 }
 
-void dbg_correl_of(int64_t value1, int64_t value2, int slot) {
+void dbg_extremes_of(i64 value, int slot) {
+    ++extremes.at(slot)[0];
 
-    ++correl[slot][0];
-    correl[slot][1] += value1;
-    correl[slot][2] += value1 * value1;
-    correl[slot][3] += value2;
-    correl[slot][4] += value2 * value2;
-    correl[slot][5] += value1 * value2;
+    i64 current_max = extremes.at(slot)[1].load();
+    while (current_max < value && !extremes.at(slot)[1].compare_exchange_weak(current_max, value))
+    {}
+
+    i64 current_min = extremes.at(slot)[2].load();
+    while (current_min > value && !extremes.at(slot)[2].compare_exchange_weak(current_min, value))
+    {}
+}
+
+void dbg_correl_of(i64 value1, i64 value2, int slot) {
+
+    ++correl.at(slot)[0];
+    correl.at(slot)[1] += value1;
+    correl.at(slot)[2] += value1 * value1;
+    correl.at(slot)[3] += value2;
+    correl.at(slot)[4] += value2 * value2;
+    correl.at(slot)[5] += value1 * value2;
 }
 
 void dbg_print() {
 
-    int64_t n;
-    auto    E   = [&n](int64_t x) { return double(x) / n; };
-    auto    sqr = [](double x) { return x * x; };
+    i64  n;
+    auto E   = [&n](i64 x) { return double(x) / n; };
+    auto sqr = [](double x) { return x * x; };
 
     for (int i = 0; i < MaxDebugSlots; ++i)
         if ((n = hit[i][0]))
@@ -337,6 +410,13 @@ void dbg_print() {
         }
 
     for (int i = 0; i < MaxDebugSlots; ++i)
+        if ((n = extremes[i][0]))
+        {
+            std::cerr << "Extremity #" << i << ": Total " << n << " Min " << extremes[i][2]
+                      << " Max " << extremes[i][1] << std::endl;
+        }
+
+    for (int i = 0; i < MaxDebugSlots; ++i)
         if ((n = correl[i][0]))
         {
             double r = (E(correl[i][5]) - E(correl[i][1]) * E(correl[i][3]))
@@ -346,6 +426,13 @@ void dbg_print() {
         }
 }
 
+void dbg_clear() {
+    hit.fill({});
+    mean.fill({});
+    stdev.fill({});
+    correl.fill({});
+    extremes.fill({});
+}
 
 // Used to serialize access to std::cout
 // to avoid multiple threads writing at the same time.
@@ -362,199 +449,188 @@ std::ostream& operator<<(std::ostream& os, SyncCout sc) {
     return os;
 }
 
+void sync_cout_start() { std::cout << IO_LOCK; }
+void sync_cout_end() { std::cout << IO_UNLOCK; }
+
+// Hash function based on public domain MurmurHash64A, by Austin Appleby.
+u64 hash_bytes(const char* data, usize size) {
+    const u64 m = 0xc6a4a7935bd1e995ull;
+    const int r = 47;
+
+    u64 h = size * m;
+
+    const char* end = data + (size & ~(usize) 7);
+
+    for (const char* p = data; p != end; p += 8)
+    {
+        u64 k;
+        std::memcpy(&k, p, sizeof(k));
+
+        k *= m;
+        k ^= k >> r;
+        k *= m;
+
+        h ^= k;
+        h *= m;
+    }
+
+    if (size & 7)
+    {
+        u64 k = 0;
+        for (int i = (size & 7) - 1; i >= 0; i--)
+            k = (k << 8) | u8(end[i]);
+
+        h ^= k;
+        h *= m;
+    }
+
+    h ^= h >> r;
+    h *= m;
+    h ^= h >> r;
+
+    return h;
+}
 
 // Trampoline helper to avoid moving Logger to misc.h
-void start_logger(const std::string& fname) { Logger::start(fname); }
+void start_logger(const fs::path& fname) { Logger::start(fname); }
 
 
-#ifdef NO_PREFETCH
-
-void prefetch(void*) {}
-
-#else
-
-void prefetch(void* addr) {
-
-    #if defined(_MSC_VER)
-    _mm_prefetch((char*) addr, _MM_HINT_T0);
-    #else
-    __builtin_prefetch(addr);
-    #endif
-}
-
-#endif
-
-
-
-
-namespace WinProcGroup {
-
-#ifndef _WIN32
-
-void bindThisThread(size_t) {}
-
-#else
-
-// Retrieves logical processor information using Windows-specific
-// API and returns the best node id for the thread with index idx. Original
-// code from Texel by Peter Österlund.
-static int best_node(size_t idx) {
-
-    int   threads      = 0;
-    int   nodes        = 0;
-    int   cores        = 0;
-    DWORD returnLength = 0;
-    DWORD byteOffset   = 0;
-
-    // Early exit if the needed API is not available at runtime
-    HMODULE k32  = GetModuleHandle(TEXT("Kernel32.dll"));
-    auto    fun1 = (fun1_t) (void (*)()) GetProcAddress(k32, "GetLogicalProcessorInformationEx");
-    if (!fun1)
-        return -1;
-
-    // First call to GetLogicalProcessorInformationEx() to get returnLength.
-    // We expect the call to fail due to null buffer.
-    if (fun1(RelationAll, nullptr, &returnLength))
-        return -1;
-
-    // Once we know returnLength, allocate the buffer
-    SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *buffer, *ptr;
-    ptr = buffer = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) malloc(returnLength);
-
-    // Second call to GetLogicalProcessorInformationEx(), now we expect to succeed
-    if (!fun1(RelationAll, buffer, &returnLength))
-    {
-        free(buffer);
-        return -1;
-    }
-
-    while (byteOffset < returnLength)
-    {
-        if (ptr->Relationship == RelationNumaNode)
-            nodes++;
-
-        else if (ptr->Relationship == RelationProcessorCore)
-        {
-            cores++;
-            threads += (ptr->Processor.Flags == LTP_PC_SMT) ? 2 : 1;
-        }
-
-        assert(ptr->Size);
-        byteOffset += ptr->Size;
-        ptr = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) (((char*) ptr) + ptr->Size);
-    }
-
-    free(buffer);
-
-    std::vector<int> groups;
-
-    // Run as many threads as possible on the same node until the core limit is
-    // reached, then move on to filling the next node.
-    for (int n = 0; n < nodes; n++)
-        for (int i = 0; i < cores / nodes; i++)
-            groups.push_back(n);
-
-    // In case a core has more than one logical processor (we assume 2) and we
-    // still have threads to allocate, spread them evenly across available nodes.
-    for (int t = 0; t < threads - cores; t++)
-        groups.push_back(t % nodes);
-
-    // If we still have more threads than the total number of logical processors
-    // then return -1 and let the OS to decide what to do.
-    return idx < groups.size() ? groups[idx] : -1;
-}
-
-
-// Sets the group affinity of the current thread
-void bindThisThread(size_t idx) {
-
-    // Use only local variables to be thread-safe
-    int node = best_node(idx);
-
-    if (node == -1)
-        return;
-
-    // Early exit if the needed API are not available at runtime
-    HMODULE k32  = GetModuleHandle(TEXT("Kernel32.dll"));
-    auto    fun2 = fun2_t((void (*)()) GetProcAddress(k32, "GetNumaNodeProcessorMaskEx"));
-    auto    fun3 = fun3_t((void (*)()) GetProcAddress(k32, "SetThreadGroupAffinity"));
-    auto    fun4 = fun4_t((void (*)()) GetProcAddress(k32, "GetNumaNodeProcessorMask2"));
-    auto    fun5 = fun5_t((void (*)()) GetProcAddress(k32, "GetMaximumProcessorGroupCount"));
-
-    if (!fun2 || !fun3)
-        return;
-
-    if (!fun4 || !fun5)
-    {
-        GROUP_AFFINITY affinity;
-        if (fun2(node, &affinity))                         // GetNumaNodeProcessorMaskEx
-            fun3(GetCurrentThread(), &affinity, nullptr);  // SetThreadGroupAffinity
-    }
-    else
-    {
-        // If a numa node has more than one processor group, we assume they are
-        // sized equal and we spread threads evenly across the groups.
-        USHORT elements, returnedElements;
-        elements                 = fun5();  // GetMaximumProcessorGroupCount
-        GROUP_AFFINITY* affinity = (GROUP_AFFINITY*) malloc(elements * sizeof(GROUP_AFFINITY));
-        if (fun4(node, affinity, elements, &returnedElements))  // GetNumaNodeProcessorMask2
-            fun3(GetCurrentThread(), &affinity[idx % returnedElements],
-                 nullptr);  // SetThreadGroupAffinity
-        free(affinity);
-    }
-}
-
-#endif
-
-}  // namespace WinProcGroup
-
+// Convert a wide string to an UTF8 string
+std::string utf8_from_wstring(std::wstring_view s) {
 #ifdef _WIN32
-    #include <direct.h>
-    #define GETCWD _getcwd
-#else
-    #include <unistd.h>
-    #define GETCWD getcwd
-#endif
+    if (s.empty())
+        return {};
 
+    int size =
+      WideCharToMultiByte(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0)
+        return {};
+
+    std::string out(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.data(), int(s.size()), out.data(), size, nullptr, nullptr);
+    return out;
+#else
+    return std::string(s.begin(), s.end());
+#endif
+}
+
+
+// This utility allows us to handle filenames and paths with UTF8 encoding
+fs::path path_from_utf8(const std::string& path) {
+#ifdef _WIN32
+    int u8len = static_cast<int>(path.size());
+
+    // First attempt UTF-8, then fall back to ANSI for old GUIs like Arena
+    constexpr int CodePages[2] = {CP_UTF8, CP_ACP};
+    for (int cp : CodePages)
+    {
+        int flags = cp == CP_UTF8 ? MB_ERR_INVALID_CHARS : 0;
+        int wlen  = MultiByteToWideChar(cp, flags, path.c_str(), u8len, NULL, 0);
+        if (wlen > 0)
+        {
+            std::wstring wstr(static_cast<usize>(wlen), L'\0');
+            MultiByteToWideChar(cp, 0, path.c_str(), u8len, wstr.data(), wlen);
+            return {wstr};
+        }
+    }
+
+    return {path};
+#else
+    return {path};
+#endif
+}
+
+
+// Constructor for the CommandLine class
 CommandLine::CommandLine(int _argc, char** _argv) :
     argc(_argc),
     argv(_argv) {
-    std::string pathSeparator;
+#ifdef _WIN32
+    // Convert any non-ANSI characters passed on the command line to UTF-8
+    int wargc = 0;
+    if (LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc))
+    {
+        for (int i = 0; i < wargc; ++i)
+            argv_storage.push_back(utf8_from_wstring(wargv[i]));
+        LocalFree(wargv);
 
-    // Extract the path+name of the executable binary
-    std::string argv0 = argv[0];
+        for (std::string& s : argv_storage)
+            argv_utf8.push_back(s.data());
+        argv_utf8.push_back(nullptr);
+
+        argc = wargc;
+        argv = argv_utf8.data();
+    }
+#endif
+}
+
+
+// Read a numerical value from the command line
+std::optional<usize> str_to_size_t(const std::string& s) {
+    if (s.empty() || s[0] == '-')
+        return std::nullopt;
+    errno                           = 0;
+    char*                    endptr = nullptr;
+    const unsigned long long value  = std::strtoull(s.c_str(), &endptr, 10);
+    if (errno == ERANGE || (*endptr != '\0' && !std::isspace(static_cast<unsigned char>(*endptr)))
+        || value > std::numeric_limits<usize>::max())
+        return std::nullopt;
+    return static_cast<usize>(value);
+}
+
+// Read the given file as bytes (returns std::nullopt if the file does not exist)
+std::optional<std::string> read_file_to_string(const std::string& path) {
+    std::ifstream f(path, std::ios_base::binary);
+    if (!f)
+        return std::nullopt;
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+// Remove all spaces from a string
+void remove_whitespace(std::string& s) {
+    s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); }),
+            s.end());
+}
+
+// Test if a string has only spaces
+bool is_whitespace(std::string_view s) {
+    return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); });
+}
+
+
+// Return the directory where our Stockfish binary sits. This is useful,
+// because when the NNUE network is not embeded in the binary, this directory
+// is one of the locations where we look for the NNUE file.
+fs::path CommandLine::get_binary_directory(fs::path argv0) {
 
 #ifdef _WIN32
-    pathSeparator = "\\";
-    #ifdef _MSC_VER
-    // Under windows argv[0] may not have the extension. Also _get_pgmptr() had
-    // issues in some Windows 10 versions, so check returned values carefully.
-    char* pgmptr = nullptr;
-    if (!_get_pgmptr(&pgmptr) && pgmptr != nullptr && *pgmptr)
-        argv0 = pgmptr;
-    #endif
-#else
-    pathSeparator = "/";
+    // Prefer the executable path reported by Windows. Unlike _get_wpgmptr,
+    // this does not depend on whether the CRT used a narrow or wide entry
+    // point. Windows paths cannot exceed 32767 characters, so a fixed
+    // buffer is always sufficient. Falls back to argv0 if the API fails.
+    constexpr DWORD MaxPath = 32768;
+    wchar_t         path[MaxPath];
+
+    if (const DWORD length = GetModuleFileNameW(nullptr, path, MaxPath))
+        argv0 = fs::path(path, path + length);
 #endif
 
-    // Extract the working directory
-    workingDirectory = "";
-    char  buff[40000];
-    char* cwd = GETCWD(buff, 40000);
-    if (cwd)
-        workingDirectory = cwd;
+    auto binaryDirectory = argv0.parent_path();
+    if (binaryDirectory.empty())
+        binaryDirectory = fs::path(".");
+    return binaryDirectory;
+}
 
-    // Extract the binary directory path from argv0
-    binaryDirectory = argv0;
-    size_t pos      = binaryDirectory.find_last_of("\\/");
-    if (pos == std::string::npos)
-        binaryDirectory = "." + pathSeparator;
-    else
-        binaryDirectory.resize(pos + 1);
+// Return the working directory
+fs::path CommandLine::get_working_directory() { return std::filesystem::current_path(); }
 
-    // Pattern replacement: "./" at the start of path is replaced by the working directory
-    if (binaryDirectory.find("." + pathSeparator) == 0)
-        binaryDirectory.replace(0, 1, workingDirectory);
+
+// On Windows, tell the console to use UTF8 encoding
+void set_console_utf8() {
+#ifdef _WIN32
+    SetConsoleCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
+#endif
 }
 
 }  // namespace Stockfish

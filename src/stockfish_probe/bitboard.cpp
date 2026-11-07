@@ -1,6 +1,6 @@
 /*
   Stockfish, a UCI chess playing engine derived from Glaurung 2.1
-  Copyright (C) 2004-2024 The Stockfish developers (see AUTHORS file)
+  Copyright (C) 2004-2026 The Stockfish developers (see AUTHORS file)
 
   Stockfish is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -18,19 +18,27 @@
 
 #include "bitboard.h"
 
-#include <bitset>
-
 namespace Stockfish {
 
-uint8_t PopCnt16[1 << 16];
+// Returns an ASCII representation of a bitboard suitable
+// to be printed to standard output. Useful for debugging.
+std::string Bitboards::pretty(Bitboard b) {
 
+    std::string s = "+---+---+---+---+---+---+---+---+\n";
 
-void Bitboards::init() {
+    for (Rank r = RANK_8;; --r)
+    {
+        for (File f = FILE_A; f <= FILE_H; ++f)
+            s += b & make_square(f, r) ? "| X " : "|   ";
 
-    for (unsigned i = 0; i < (1 << 16); ++i)
-        PopCnt16[i] = uint8_t(std::bitset<16>(i).count());
+        s += "| " + std::to_string(1 + r) + "\n+---+---+---+---+---+---+---+---+\n";
 
+        if (r == RANK_1)
+            break;
+    }
+    s += "  a   b   c   d   e   f   g   h\n";
+
+    return s;
 }
-
 
 }  // namespace Stockfish

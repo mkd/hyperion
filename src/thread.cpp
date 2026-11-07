@@ -91,10 +91,7 @@ void Thread::idle_loop() {
 
         // Give this thread its own copy of the main thread's NNUE accumulator stack.
         if (main_nnue_pos && main_nnue_setup) {
-            Stockfish::Incremental::sync_from_main_thread(
-                *static_cast<const Stockfish::Position*>(main_nnue_pos),
-                *static_cast<const std::deque<Stockfish::StateInfo>*>(main_nnue_setup)
-            );
+            Stockfish::Incremental::sync_from_main_thread(main_nnue_pos, main_nnue_setup);
         }
 
         synced.store(true, std::memory_order_release);
@@ -119,8 +116,8 @@ void Thread::wait_for_search_finished() {
 }
 
 void ThreadPool::start_thinking() {
-    const void* main_pos   = &Stockfish::Incremental::get_global_pos();
-    const void* main_setup = &Stockfish::Incremental::get_setup_states();
+    const void* main_pos   = Stockfish::Incremental::get_global_pos();
+    const void* main_setup = Stockfish::Incremental::get_setup_states();
 
     main()->state.root_repetition_index = main()->state.repetition_index;
 

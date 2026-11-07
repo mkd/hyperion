@@ -18,20 +18,27 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # =============================================================================
 #
-#  Cross-platform Makefile.  Builds Hyperion for any combination of
+#  Ultra-portable cross-platform Makefile. Builds Hyperion for:
 #
 #      OS:            linux | macos | windows
-#      architecture:  x86_64 | arm64
+#      architecture:  x86_64 (AVX-512, AVX2, BMI2, SSE4.1) | arm64 (NEON, dotprod, Apple Silicon)
 #
-#  from any of those hosts.  Works with GNU Make 3.81 or newer.
+#  from any host with peak hardware acceleration and full C++26 optimizations.
 #
 #  Quick start
 #  -----------
 #      make -j                         native build  ->  ./hyperion
 #      make bench                      native build + built-in benchmark
-#      make TARGET=windows-x86_64      cross build   ->  dist/hyperion-<ver>-windows-x86_64.exe
-#      make release                    every target whose toolchain is installed -> dist/
-#      make help                       full list of targets and options
+#      make apple-silicon              optimized for Apple Silicon M-series
+#      make x86-64-avx512              AVX-512 optimized build
+#      make x86-64-avx2                AVX2 / BMI2 optimized build
+#      make windows-x86_64             cross-compile for Windows x86_64 (.exe)
+#      make windows-arm64              cross-compile for Windows ARM64 (.exe)
+#      make linux-x86_64               cross-compile for Linux x86_64
+#      make linux-arm64                cross-compile for Linux ARM64
+#      make release                    build all supported platforms into dist/
+#      make net                        fetch/validate NNUE network
+#      make help                       full documentation of targets and flags
 #
 # =============================================================================
 
@@ -39,6 +46,8 @@ NAME    := hyperion
 VERSION := $(shell grep -m1 'define EngineVersion' src/uci.h 2>/dev/null | cut -d'"' -f2)
 
 .DEFAULT_GOAL := all
+
+SHELL := /bin/sh
 
 # -----------------------------------------------------------------------------
 # 1. Host detection
@@ -71,9 +80,7 @@ else
 endif
 
 # -----------------------------------------------------------------------------
-# 2. Target selection:  make TARGET=<os>-<arch>   (or TARGET_OS= / TARGET_ARCH=)
-#      os   : linux | macos | windows
-#      arch : x86_64 | arm64
+# 2. Target selection:  make TARGET=<os>-<arch> [ARCH=<sub-arch>]
 # -----------------------------------------------------------------------------
 
 ifdef TARGET
@@ -104,48 +111,52 @@ else
 endif
 
 TARGET_TRIPLET := $(TARGET_OS)-$(TARGET_ARCH)
-ALL_TARGETS    := linux-x86_64 linux-arm64 macos-x86_64 macos-arm64 windows-x86_64 windows-arm64
+ALL_TARGETS    := linux-x86_64 linux-arm64 macos-arm64 windows-x86_64 windows-arm64
 
 CROSS := $(if $(and $(filter $(HOST_OS),$(TARGET_OS)),$(filter $(HOST_ARCH),$(TARGET_ARCH))),0,1)
 EXE   := $(if $(filter windows,$(TARGET_OS)),.exe,)
 
-# PORTABLE=1 builds for a generic CPU of the target architecture (required for
-# anything you redistribute).  The default for native builds is -march=native.
 PORTABLE ?= $(CROSS)
 
-# Where the binary goes: ./hyperion for local builds, dist/ for cross/portable.
-OUT ?= $(if $(filter 1,$(CROSS) $(PORTABLE)),dist/$(NAME)-$(VERSION)-$(TARGET_TRIPLET)$(EXE),$(NAME)$(EXE))
+# Sub-architecture defaults
+ifeq ($(ARCH),)
+    ifeq ($(TARGET_ARCH),arm64)
+        ifeq ($(TARGET_OS),macos)
+            ARCH := apple-silicon
+        else
+            ARCH := arm64-dotprod
+        endif
+    else
+        ifeq ($(CROSS),1)
+            ARCH := x86-64-avx2
+        else
+            ARCH := native
+        endif
+    endif
+endif
 
-BUILD_DIR := build/$(TARGET_TRIPLET)-$(if $(filter 1,$(PORTABLE)),portable,native)$(if $(DEBUG),-debug,)
+# Where the binary goes
+OUT ?= $(if $(filter 1,$(CROSS) $(PORTABLE)),dist/$(NAME)-$(VERSION)-$(TARGET_TRIPLET)-$(ARCH)$(EXE),$(NAME)$(EXE))
+
+BUILD_DIR := build/$(TARGET_TRIPLET)-$(ARCH)$(if $(filter 1,$(PORTABLE)),-portable,)$(if $(DEBUG),-debug,)
 
 # -----------------------------------------------------------------------------
 # 3. Toolchain selection
-#
-#    TOOLCHAIN=auto   (default) native compiler, else a prefixed GNU/LLVM cross
-#                     compiler found in PATH, else zig.
-#    TOOLCHAIN=zig    `zig c++` - one toolchain for every OS/arch pair
-#                     (https://ziglang.org, no sysroots needed).
-#    CXX=<compiler>   use exactly this compiler (e.g. CXX=clang++ -target ...).
 # -----------------------------------------------------------------------------
 
 TOOLCHAIN ?= auto
-
 have = $(firstword $(foreach c,$(1),$(if $(shell command -v $(c) 2>/dev/null),$(c))))
 
-# Cross-compiler candidates, keyed by <os>_<arch>.
 CAND_linux_x86_64   := x86_64-linux-gnu-g++ x86_64-unknown-linux-gnu-g++ x86_64-linux-musl-g++
 CAND_linux_arm64    := aarch64-linux-gnu-g++ aarch64-unknown-linux-gnu-g++ aarch64-linux-musl-g++
 CAND_windows_x86_64 := x86_64-w64-mingw32-g++ x86_64-w64-mingw32-clang++
-CAND_windows_arm64  := aarch64-w64-mingw32-g++ aarch64-w64-mingw32-clang++
-CAND_macos_x86_64   := o64-clang++ x86_64-apple-darwin-clang++
+CAND_windows_arm64  := aarch64-w64-mingw32-clang++ aarch64-w64-mingw32-g++
 CAND_macos_arm64    := oa64-clang++ aarch64-apple-darwin-clang++ arm64-apple-darwin-clang++
 
-# Target triples understood by `zig c++ -target`.
 ZIG_linux_x86_64   := x86_64-linux-gnu
 ZIG_linux_arm64    := aarch64-linux-gnu
 ZIG_windows_x86_64 := x86_64-windows-gnu
 ZIG_windows_arm64  := aarch64-windows-gnu
-ZIG_macos_x86_64   := x86_64-macos
 ZIG_macos_arm64    := aarch64-macos
 
 _KEY := $(TARGET_OS)_$(TARGET_ARCH)
@@ -170,9 +181,8 @@ else ifeq ($(CROSS),0)
         CXX := g++
     endif
 else ifeq ($(and $(filter macos,$(HOST_OS)),$(filter macos,$(TARGET_OS))),macos)
-    # macOS -> other macOS architecture: Apple clang is a multi-arch compiler.
     CXX := clang++
-    ARCH_DRIVER_FLAGS := -arch $(if $(filter arm64,$(TARGET_ARCH)),arm64,x86_64)
+    ARCH_DRIVER_FLAGS := -arch arm64
     TOOLCHAIN_NAME := apple clang (-arch)
 else
     _FOUND := $(call have,$(CAND_$(_KEY)))
@@ -185,11 +195,11 @@ else
     else
         CXX := false
         TOOLCHAIN_NAME := none
-        TOOLCHAIN_ERROR := no toolchain found for $(TARGET_TRIPLET) on $(HOST_OS)-$(HOST_ARCH). Install one of: $(CAND_$(_KEY)) - or install zig and use TOOLCHAIN=zig
+        TOOLCHAIN_ERROR := no toolchain found for $(TARGET_TRIPLET) on $(HOST_OS)-$(HOST_ARCH). Install $(CAND_$(_KEY)) or install zig (https://ziglang.org)
     endif
 endif
 
-# Highest C++ standard flag the selected compiler understands.
+# Highest C++ standard flag
 ifeq ($(TOOLCHAIN_ERROR),)
     STD ?= $(shell echo | $(CXX) -std=c++26 -x c++ -fsyntax-only - >/dev/null 2>&1 && echo c++26 || echo c++2c)
 else
@@ -197,7 +207,7 @@ else
 endif
 
 # -----------------------------------------------------------------------------
-# 4. Compiler and linker flags
+# 4. Compiler and linker flags (Acceleration & SIMD)
 # -----------------------------------------------------------------------------
 
 INCLUDES := -Isrc -Isrc/stockfish_probe
@@ -217,37 +227,52 @@ ifdef SANITIZE
     LDFLAGS  += -fsanitize=$(SANITIZE)
 endif
 
-# ---- CPU architecture ------------------------------------------------------
+# Hardware SIMD and instruction set features
 ifeq ($(TARGET_ARCH),x86_64)
-    # NNUE needs AVX2 (Haswell / Zen 2 or newer).  x86-64-v3 is the portable baseline.
-    X86_LEVEL ?= x86-64-v3
-    ifeq ($(PORTABLE),1)
-        CXXFLAGS += -march=$(X86_LEVEL)
+    ifeq ($(ARCH),x86-64-avx512)
+        CXXFLAGS += -mavx512f -mavx512bw -mavx512dq -mavx512vl -mbmi -mbmi2 -mpopcnt \
+                    -DUSE_AVX512 -DUSE_AVX2 -DUSE_SSE41 -DUSE_SSSE3 -DUSE_SSE2
+    else ifeq ($(ARCH),x86-64-avx2)
+        CXXFLAGS += -mavx2 -mbmi -mbmi2 -mpopcnt -DUSE_AVX2 -DUSE_SSE41 -DUSE_SSSE3 -DUSE_SSE2
+    else ifeq ($(ARCH),x86-64-bmi2)
+        CXXFLAGS += -mavx2 -mbmi2 -mpopcnt -DUSE_AVX2 -DUSE_SSE41 -DUSE_SSSE3 -DUSE_SSE2
+    else ifeq ($(ARCH),x86-64-modern)
+        CXXFLAGS += -msse4.1 -mpopcnt -DUSE_SSE41 -DUSE_SSSE3 -DUSE_SSE2
+    else ifeq ($(ARCH),x86-64-ssse3)
+        CXXFLAGS += -mssse3 -DUSE_SSSE3 -DUSE_SSE2
     else
-        CXXFLAGS += -march=native
+        # native build on x86_64
+        ifeq ($(PORTABLE),1)
+            CXXFLAGS += -march=x86-64-v3 -DUSE_AVX2 -DUSE_SSE41 -DUSE_SSSE3 -DUSE_SSE2 -mbmi2
+        else
+            CXXFLAGS += -march=native -DUSE_AVX2 -DUSE_SSE41 -DUSE_SSSE3 -DUSE_SSE2 -mbmi2
+        endif
     endif
-    CXXFLAGS += -DUSE_AVX2 -DUSE_SSE41 -DUSE_SSSE3 -DUSE_SSE2 -mbmi2
 else
-    # ARMv8 with dot-product instructions (all Apple Silicon, Graviton 2+, Snapdragon X, ...).
-    CXXFLAGS += -DUSE_NEON=8
-    ifeq ($(PORTABLE),1)
-        ifeq ($(TARGET_OS),macos)
+    # ARM64
+    CXXFLAGS += -DUSE_NEON=8 -DUSE_NEON_DOTPROD
+    ifeq ($(ARCH),apple-silicon)
+        ifeq ($(PORTABLE),1)
             CXXFLAGS += -mcpu=apple-m1
         else
-            CXXFLAGS += -march=armv8.2-a+dotprod
+            CXXFLAGS += $(if $(filter macos,$(HOST_OS)),-mcpu=native,-mcpu=apple-m1)
         endif
+    else ifeq ($(ARCH),arm64-neon)
+        override CXXFLAGS := $(filter-out -DUSE_NEON_DOTPROD,$(CXXFLAGS))
+        CXXFLAGS += -march=armv8-a
     else
-        CXXFLAGS += -mcpu=native
+        ifeq ($(PORTABLE),1)
+            CXXFLAGS += -march=armv8.2-a+dotprod
+        else
+            CXXFLAGS += -mcpu=native
+        endif
     endif
 endif
 
-# ---- Operating system ------------------------------------------------------
+# Operating system specific flags
 ifeq ($(TARGET_OS),windows)
-    # Static runtime: no MinGW DLLs next to the .exe.  The PE stack reserve is the
-    # default stack size of every thread, so deep searches need it raised.
     LDFLAGS += -static -Wl,--stack,16777216
 else ifeq ($(TARGET_OS),linux)
-    # Cross-built Linux binaries are linked statically so they run on any distro.
     STATIC ?= $(CROSS)
     ifeq ($(STATIC),1)
         LDFLAGS += -static
@@ -261,45 +286,52 @@ ifeq ($(STRIP),1)
 endif
 
 # -----------------------------------------------------------------------------
-# 5. Sources and objects
+# 5. Sources and objects (SFNNv16 Architecture)
 # -----------------------------------------------------------------------------
 
 SRCS := main.cpp bitboard.cpp tt.cpp position.cpp movgen.cpp eval.cpp search.cpp \
         uci.cpp tbprobe.cpp thread.cpp crash_recovery.cpp \
         stockfish_probe/probe.cpp stockfish_probe/position.cpp stockfish_probe/bitboard.cpp \
         stockfish_probe/evaluate.cpp stockfish_probe/misc.cpp stockfish_probe/memory.cpp \
-        stockfish_probe/nnue_incremental.cpp stockfish_probe/nnue/evaluate_nnue.cpp \
-        stockfish_probe/nnue/features/half_ka_v2_hm.cpp
+        stockfish_probe/attacks.cpp \
+        stockfish_probe/nnue_incremental.cpp stockfish_probe/nnue/nnue_misc.cpp \
+        stockfish_probe/nnue/nnue_accumulator.cpp stockfish_probe/nnue/network.cpp \
+        stockfish_probe/nnue/features/full_threats.cpp stockfish_probe/nnue/features/half_ka_v2_hm.cpp \
+        stockfish_probe/nnue/features/pp_3wide.cpp
 
 OBJS := $(addprefix $(BUILD_DIR)/,$(SRCS:.cpp=.o))
 DEPS := $(OBJS:.o=.d)
 
-NETS := nn-b1a57edbea57.nnue nn-baff1ede1f90.nnue
+NET := nn-1a298aa575a0.nnue
 
 NPROC := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
-# V=1 prints the full compiler command lines.
 Q := $(if $(V),,@)
 
 # -----------------------------------------------------------------------------
 # 6. Targets
 # -----------------------------------------------------------------------------
 
-.PHONY: all build bench release targets probe info check-toolchain clean distclean install help
+.PHONY: all build bench release targets probe info check-toolchain clean distclean install help net config-sanity \
+        x86-64-avx512 x86-64-avx2 x86-64-bmi2 x86-64-modern apple-silicon arm64 \
+        linux-x86_64 linux-arm64 windows-x86_64 windows-arm64 macos-arm64
 
-# `make` builds in parallel by default; `make -jN` still takes precedence.
 all:
 	@$(MAKE) --no-print-directory -j$(NPROC) build
 
-build: info check-toolchain $(OUT)
+build: net info check-toolchain $(OUT)
+
+net:
+	@$(SHELL) scripts/net.sh
+
+config-sanity: net
 
 info:
-	@echo "Hyperion $(VERSION): $(HOST_OS)-$(HOST_ARCH) -> $(TARGET_TRIPLET) | toolchain: $(TOOLCHAIN_NAME) | -std=$(STD) | $(if $(filter 1,$(PORTABLE)),portable,native CPU) -> $(OUT)"
+	@echo "Hyperion $(VERSION): $(HOST_OS)-$(HOST_ARCH) -> $(TARGET_TRIPLET) [$(ARCH)] | toolchain: $(TOOLCHAIN_NAME) | -std=$(STD) | $(if $(filter 1,$(PORTABLE)),portable,native CPU) -> $(OUT)"
 
 check-toolchain:
 	@if [ -n "$(TOOLCHAIN_ERROR)" ]; then echo "error: $(TOOLCHAIN_ERROR)" >&2; exit 1; fi
 
-# Exits successfully when a toolchain exists for the selected TARGET (used by `release`).
 probe:
 	@test -z "$(TOOLCHAIN_ERROR)"
 
@@ -315,12 +347,46 @@ $(BUILD_DIR)/%.o: src/%.cpp
 
 -include $(DEPS)
 
-# Native build, then run the built-in benchmark (node count is a regression fingerprint).
+# Benchmark
 bench: all
 	./$(OUT) bench $(or $(DEPTH),12)
 
-# Build every target whose toolchain is available into dist/ (portable CPU level, stripped).
-release:
+# Convenience target shortcuts
+apple-silicon:
+	@$(MAKE) --no-print-directory TARGET=macos-arm64 ARCH=apple-silicon build
+
+x86-64-avx512:
+	@$(MAKE) --no-print-directory TARGET=$(HOST_OS)-x86_64 ARCH=x86-64-avx512 build
+
+x86-64-avx2:
+	@$(MAKE) --no-print-directory TARGET=$(HOST_OS)-x86_64 ARCH=x86-64-avx2 build
+
+x86-64-bmi2:
+	@$(MAKE) --no-print-directory TARGET=$(HOST_OS)-x86_64 ARCH=x86-64-bmi2 build
+
+x86-64-modern:
+	@$(MAKE) --no-print-directory TARGET=$(HOST_OS)-x86_64 ARCH=x86-64-modern build
+
+arm64:
+	@$(MAKE) --no-print-directory TARGET=$(HOST_OS)-arm64 ARCH=arm64-dotprod build
+
+linux-x86_64:
+	@$(MAKE) --no-print-directory TARGET=linux-x86_64 ARCH=x86-64-avx2 PORTABLE=1 build
+
+linux-arm64:
+	@$(MAKE) --no-print-directory TARGET=linux-arm64 ARCH=arm64-dotprod PORTABLE=1 build
+
+windows-x86_64:
+	@$(MAKE) --no-print-directory TARGET=windows-x86_64 ARCH=x86-64-avx2 PORTABLE=1 build
+
+windows-arm64:
+	@$(MAKE) --no-print-directory TARGET=windows-arm64 ARCH=arm64-dotprod PORTABLE=1 build
+
+macos-arm64:
+	@$(MAKE) --no-print-directory TARGET=macos-arm64 ARCH=apple-silicon PORTABLE=1 build
+
+# Build every target whose toolchain is available into dist/
+release: net
 	@mkdir -p dist
 	@for t in $(ALL_TARGETS); do \
 	    if $(MAKE) --no-print-directory -s TARGET=$$t PORTABLE=1 probe >/dev/null 2>&1; then \
@@ -330,19 +396,19 @@ release:
 	        echo "==> $$t: skipped (no toolchain; install one or use TOOLCHAIN=zig)"; \
 	    fi; \
 	done
-	@cp -f $(NETS) dist/ 2>/dev/null || true
+	@cp -f $(NET) dist/ 2>/dev/null || true
 	@echo "Release binaries:" && ls -lh dist | grep $(NAME) || true
 
 targets:
 	@echo "Supported targets (make TARGET=<os>-<arch>):"
 	@for t in $(ALL_TARGETS); do echo "  $$t"; done
+	@echo "Supported architectures: apple-silicon, x86-64-avx512, x86-64-avx2, x86-64-bmi2, x86-64-modern, arm64-dotprod, arm64-neon"
 	@echo "Host: $(HOST_OS)-$(HOST_ARCH)"
 
-# PREFIX=/usr/local make install
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/share/hyperion
 	install -m 755 $(OUT) $(DESTDIR)$(PREFIX)/bin/$(NAME)$(EXE)
-	install -m 644 $(NETS) $(DESTDIR)$(PREFIX)/share/hyperion/
+	install -m 644 $(NET) $(DESTDIR)$(PREFIX)/share/hyperion/
 PREFIX ?= /usr/local
 
 clean:
@@ -352,37 +418,33 @@ distclean: clean
 	rm -rf dist
 
 help:
-	@echo "Hyperion $(VERSION) - build system"
+	@echo "Hyperion $(VERSION) - Ultra-Portable High Performance Build System"
 	@echo ""
 	@echo "Usage: make [target] [option=value ...]"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all (default)    Build for the target (parallel). Native: ./$(NAME); cross: dist/"
 	@echo "  bench            Native build + 'hyperion bench' (DEPTH=12 by default)"
+	@echo "  net              Download and validate NNUE file ($(NET)) if missing"
 	@echo "  release          Build every target with an available toolchain into dist/"
-	@echo "  targets          List supported <os>-<arch> targets"
-	@echo "  install          Install to PREFIX (default /usr/local)"
-	@echo "  clean/distclean  Remove build/ and binaries (distclean also removes dist/)"
+	@echo "  apple-silicon    Build for Apple Silicon M-series (NEON + dotprod)"
+	@echo "  x86-64-avx512    Build for x86_64 AVX-512"
+	@echo "  x86-64-avx2      Build for x86_64 AVX2 / BMI2"
+	@echo "  x86-64-modern    Build for x86_64 SSE4.1 / popcnt"
+	@echo "  linux-x86_64     Build Linux x86_64 binary"
+	@echo "  linux-arm64      Build Linux ARM64 binary"
+	@echo "  windows-x86_64   Build Windows x86_64 (.exe) binary"
+	@echo "  windows-arm64    Build Windows ARM64 (.exe) binary"
+	@echo "  macos-arm64      Build macOS ARM64 binary"
+	@echo "  clean/distclean  Remove build/ and binaries"
 	@echo ""
 	@echo "Options:"
-	@echo "  TARGET=<os>-<arch>   linux|macos|windows - x86_64|arm64 (default: host $(HOST_OS)-$(HOST_ARCH))"
+	@echo "  TARGET=<os>-<arch>   linux|macos|windows - x86_64|arm64"
+	@echo "  ARCH=<arch>          apple-silicon|x86-64-avx512|x86-64-avx2|x86-64-modern|arm64-dotprod"
 	@echo "  TOOLCHAIN=auto|zig   Cross toolchain: PATH-detected GNU/LLVM compilers, or 'zig c++'"
-	@echo "  CXX=<compiler>       Use exactly this compiler"
-	@echo "  PORTABLE=0|1         1 = generic CPU baseline (x86-64-v3 / armv8.2+dotprod); default 1 when cross"
-	@echo "  X86_LEVEL=x86-64-v3  x86_64 baseline for portable builds (v3 = AVX2, v4 = AVX-512)"
-	@echo "  STATIC=0|1           Static linking on Linux (default 1 when cross compiling)"
-	@echo "  STRIP=1              Strip symbols    LTO=0  Disable link-time optimisation"
-	@echo "  DEBUG=1              -O0 -g           SANITIZE=address|undefined|thread"
-	@echo "  V=1                  Echo compiler command lines"
-	@echo ""
-	@echo "Cross toolchains (any one per target):"
-	@echo "  linux-x86_64     x86_64-linux-gnu-g++      linux-arm64     aarch64-linux-gnu-g++"
-	@echo "  windows-x86_64   x86_64-w64-mingw32-g++    windows-arm64   aarch64-w64-mingw32-clang++ (llvm-mingw)"
-	@echo "  macos-*          clang++ on macOS, osxcross (o64-clang++/oa64-clang++) elsewhere"
-	@echo "  any target       zig (TOOLCHAIN=zig) - single toolchain, no sysroots"
-	@echo ""
-	@echo "Examples:"
-	@echo "  make -j                              # native"
-	@echo "  make TARGET=windows-x86_64           # Windows .exe via MinGW-w64"
-	@echo "  make TARGET=linux-arm64 TOOLCHAIN=zig"
-	@echo "  make release                         # everything available"
+	@echo "  CXX=<compiler>       Explicit C++ compiler executable"
+	@echo "  PORTABLE=0|1         1 = generic CPU baseline; default 1 when cross-compiling"
+	@echo "  STRIP=1              Strip symbols"
+	@echo "  LTO=0|1              Link-time optimization (default 1 in release)"
+	@echo "  DEBUG=1              Debug build (-O0 -g)"
+	@echo "  SANITIZE=...         Address/undefined/thread sanitizers"
